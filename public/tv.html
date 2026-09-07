@@ -84,7 +84,7 @@
   <script src="/sdf-karaoke-pro-renderer.js"></script>
   <script src="/cdg-engine-lite.js"></script>
   <script>
-    const TV_CLIENT_VERSION = "LAB-TV-4.1";
+    const TV_CLIENT_VERSION = "LAB-TV-4.2";
     const TRANSPORT_MODE = "HTTP_PRELOAD";
     const socket = io({
       reconnection: true,
@@ -271,7 +271,19 @@
     }
 
     function resetBackgroundPerformanceMetrics() {
-      resetBackgroundPerformanceMetrics();
+      backgroundMetrics.fps = 0;
+      backgroundMetrics.frames = 0;
+      backgroundMetrics.avgDrawMs = 0;
+      backgroundMetrics.maxDrawMs = 0;
+      backgroundMetrics.fallbackCount = 0;
+      backgroundMetrics.displayFps = 0;
+      backgroundMetrics.effectiveTargetFps = 0;
+      bgPerfFrames = 0;
+      bgPerfWindowAt = performance.now();
+      displayRafFrames = 0;
+      displayRafWindowAt = performance.now();
+      bgPoorWindows = 0;
+      bgLastDrawAt = 0;
       el("backgroundFps").textContent = "—";
     }
 
@@ -1403,6 +1415,27 @@
       if (mediaReady && el("state").textContent === "TOCA LA TV") playCurrent(currentTraceId);
     });
 
+    window.addEventListener("error", (event) => {
+      const message = String(event?.error?.message || event?.message || "JavaScript error");
+      report("TV_JS_ERROR", {
+        state: playbackStateForDiagnostic(),
+        error: message,
+        filename: String(event?.filename || "").slice(-180),
+        lineno: Number(event?.lineno || 0),
+        colno: Number(event?.colno || 0),
+        stack: String(event?.error?.stack || "").slice(0, 1800)
+      }, "error");
+    });
+
+    window.addEventListener("unhandledrejection", (event) => {
+      const reason = event?.reason;
+      report("TV_UNHANDLED_REJECTION", {
+        state: playbackStateForDiagnostic(),
+        error: String(reason?.message || reason || "Unhandled promise rejection"),
+        stack: String(reason?.stack || "").slice(0, 1800)
+      }, "error");
+    });
+
     socket.on("connect", () => {
       transportMetrics.socketConnected = true;
       transportMetrics.socketTransport = socket.io?.engine?.transport?.name || null;
@@ -1455,7 +1488,18 @@
     socket.on("player:command", async (event) => {
       const command = String(event.command || "").toUpperCase();
       if (command === "LOAD" && event.media) {
-        await loadMedia(event.media, Number(event.sentAt || 0));
+        try {
+          await loadMedia(event.media, Number(event.sentAt || 0));
+        } catch (error) {
+          const message = String(error && error.message ? error.message : error);
+          setState("ERROR", message);
+          report("TV_LOAD_HANDLER_ERROR", {
+            state: "error",
+            command,
+            error: message,
+            stack: String(error && error.stack ? error.stack : "").slice(0, 1800)
+          }, "error");
+        }
         return;
       }
       if (command === "PLAY") {
