@@ -1,13 +1,13 @@
 {
   "name": "kitkaraoke-demo-server-lab",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Laboratorio aislado para demos remotos KITKARAOKE DJ/TV",
   "type": "commonjs",
   "scripts": {
-    "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
-    "check": "node --check src/server.js"
+    "start": "node src/server-v3.js",
+    "dev": "node --watch src/server-v3.js",
+    "check": "node --check src/server-v3.js"
   },
   "engines": {
     "node": ">=20"
