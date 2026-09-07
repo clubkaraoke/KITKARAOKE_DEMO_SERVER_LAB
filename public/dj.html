@@ -47,6 +47,16 @@
           </select>
         </div>
 
+        <div class="quality-control">
+          <div class="kicker">Calidad CDG</div>
+          <div class="quality-switch" id="cdgQualitySwitch">
+            <button type="button" class="quality-btn active" data-quality="original">ORIGINAL</button>
+            <button type="button" class="quality-btn" data-quality="sdf-lab-v2">SDF LAB V2</button>
+            <button type="button" class="quality-btn" data-quality="sdf-karaoke-pro">SDF KARAOKE PRO</button>
+          </div>
+          <div id="cdgQualityNote" class="inline-note">ORIGINAL · render CDG clásico, máxima compatibilidad.</div>
+        </div>
+
         <div class="stage-box">
           <span class="dot" id="stageDot"></span>
           <div>
@@ -129,6 +139,7 @@
     let currentTraceId = null;
     let diagnosticEvents = [];
     let currentRoomState = null;
+    let selectedCdgQuality = localStorage.getItem("kitkaraoke-cdg-quality") || "original";
 
     const el = (id) => document.getElementById(id);
     const logEl = el("log");
@@ -231,6 +242,39 @@
         el("searchNote").textContent = "Vincula primero el KITKARAOKE Agent.";
       }
     }
+
+    const QUALITY_LABELS = {
+      "original": "ORIGINAL",
+      "sdf-lab-v2": "SDF LAB V2",
+      "sdf-karaoke-pro": "SDF KARAOKE PRO"
+    };
+
+    const QUALITY_NOTES = {
+      "original": "ORIGINAL · render CDG clásico, máxima compatibilidad.",
+      "sdf-lab-v2": "SDF LAB V2 · suavizado SDF con halo, corte, gamma y escala 8×.",
+      "sdf-karaoke-pro": "SDF KARAOKE PRO · SDF avanzado con gradiente, contorno y sombra."
+    };
+
+    function setCdgQuality(mode) {
+      if (!QUALITY_LABELS[mode]) mode = "original";
+      selectedCdgQuality = mode;
+      localStorage.setItem("kitkaraoke-cdg-quality", mode);
+
+      document.querySelectorAll("#cdgQualitySwitch .quality-btn").forEach((button) => {
+        button.classList.toggle("active", button.dataset.quality === mode);
+      });
+
+      el("cdgQualityNote").textContent = QUALITY_NOTES[mode];
+      simpleLog("Calidad CDG seleccionada", {
+        mode,
+        label: QUALITY_LABELS[mode]
+      });
+    }
+
+    document.querySelectorAll("#cdgQualitySwitch .quality-btn").forEach((button) => {
+      button.addEventListener("click", () => setCdgQuality(button.dataset.quality));
+    });
+    setCdgQuality(selectedCdgQuality);
 
     socket.on("connect", () => {
       el("dot").classList.add("online");
@@ -340,6 +384,7 @@
         title: item.artist ? item.artist + " - " + item.title : item.title,
         format: item.format,
         audio: item.audio || null,
+        cdgQuality: String(item.format).toUpperCase() === "CDG" ? selectedCdgQuality : null,
         source: "KITKARAOKE_AGENT"
       };
 
