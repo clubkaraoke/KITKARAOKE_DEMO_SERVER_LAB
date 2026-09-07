@@ -1036,7 +1036,10 @@ io.on("connection", (socket) => {
       backgroundMetrics: safeObject(payload.backgroundMetrics || {}),
       transport: safeObject(payload.transport || {}),
       error: payload.error || null
-    }, traceId, payload.level === "error" ? "error" : "info");
+    }, traceId,
+      payload.level === "error" ? "error" :
+      payload.level === "warn" ? "warn" : "info"
+    );
 
     if (room.djSocketId) {
       io.to(room.djSocketId).emit("player:status", {
