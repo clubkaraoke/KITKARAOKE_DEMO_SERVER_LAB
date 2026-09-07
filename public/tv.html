@@ -512,7 +512,7 @@
         previousQuality: previous,
         activeQuality: activeBackgroundQuality,
         reason: "FPS_BELOW_TARGET"
-      }, "error");
+      }, "warn");
     }
 
     function applyBackground(mode, quality, source) {
@@ -787,7 +787,7 @@
             attempt,
             nextAttempt: attempt + 1,
             error: String(error.message || error)
-          }, "error");
+          }, "warn");
           await new Promise((resolve) => setTimeout(resolve, 250 * Math.pow(2, attempt - 1)));
         }
       }
