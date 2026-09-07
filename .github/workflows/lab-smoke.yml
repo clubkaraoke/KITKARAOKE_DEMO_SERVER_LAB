@@ -48,6 +48,8 @@ jobs:
           grep -q 'cdgQuality' src/server-v3.js
           grep -q 'SDF LAB V2' public/dj.html
           grep -q 'SDF KARAOKE PRO' public/dj.html
+          grep -q 'Copiar logs TV' public/tv.html
+          grep -q 'buildTvDiagnosticText' public/tv.html
           grep -q 'Descargar TXT' public/dj.html
 
       - name: Start server
