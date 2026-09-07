@@ -57,6 +57,40 @@
           <div id="cdgQualityNote" class="inline-note">ORIGINAL · render CDG clásico, máxima compatibilidad.</div>
         </div>
 
+        <div class="quality-control">
+          <div class="kicker">Fondo CDG</div>
+          <div class="quality-switch background-switch" id="cdgBackgroundSwitch">
+            <button type="button" class="quality-btn active" data-bg="black">NEGRO</button>
+            <button type="button" class="quality-btn" data-bg="waves">ONDAS</button>
+            <button type="button" class="quality-btn" data-bg="glow">GLOW</button>
+            <button type="button" class="quality-btn" data-bg="gradient">GRADIENTE</button>
+            <button type="button" class="quality-btn" data-bg="particles">PARTÍCULAS</button>
+          </div>
+          <div id="cdgBackgroundNote" class="inline-note">NEGRO · fondo clásico. Las letras CDG se renderizan como capa transparente.</div>
+        </div>
+
+        <div class="quality-control control-split">
+          <div>
+            <div class="kicker">Rendimiento del fondo</div>
+            <div class="quality-switch" id="backgroundQualitySwitch">
+              <button type="button" class="quality-btn" data-bg-quality="light">LIGERO</button>
+              <button type="button" class="quality-btn active" data-bg-quality="normal">NORMAL</button>
+              <button type="button" class="quality-btn" data-bg-quality="premium">PREMIUM</button>
+            </div>
+            <div id="backgroundQualityNote" class="inline-note">NORMAL · equilibrio entre fluidez y calidad visual.</div>
+          </div>
+          <div>
+            <div class="kicker">Calidad de video</div>
+            <div class="quality-switch" id="videoQualitySwitch">
+              <button type="button" class="quality-btn active" data-video-quality="auto">AUTO</button>
+              <button type="button" class="quality-btn" data-video-quality="360">360p</button>
+              <button type="button" class="quality-btn" data-video-quality="540">540p</button>
+              <button type="button" class="quality-btn" data-video-quality="720">720p</button>
+            </div>
+            <div id="videoQualityNote" class="inline-note">AUTO · hasta 720p, manteniendo el tamaño del demo bajo control.</div>
+          </div>
+        </div>
+
         <div class="stage-box">
           <span class="dot" id="stageDot"></span>
           <div>
@@ -140,6 +174,9 @@
     let diagnosticEvents = [];
     let currentRoomState = null;
     let selectedCdgQuality = localStorage.getItem("kitkaraoke-cdg-quality") || "original";
+    let selectedCdgBackground = localStorage.getItem("kitkaraoke-cdg-background") || "black";
+    let selectedBackgroundQuality = localStorage.getItem("kitkaraoke-bg-quality") || "normal";
+    let selectedVideoQuality = localStorage.getItem("kitkaraoke-video-quality") || "auto";
 
     const el = (id) => document.getElementById(id);
     const logEl = el("log");
@@ -232,7 +269,8 @@
         el("agentCaps").textContent =
           "FFmpeg: " + (caps.ffmpeg ? "LISTO" : "NO") +
           " · CDG→AAC: " + (caps.cdgAacDemo ? "LISTO" : "NO") +
-          " · MP4 H.264: " + (caps.mp4H264Demo ? "LISTO" : "NO");
+          " · MP4 H.264: " + (caps.mp4H264Demo ? "LISTO" : "NO") +
+          " · Video: " + (Array.isArray(caps.videoQualities) ? caps.videoQualities.join("/") : "auto/360/540/720");
         el("searchNote").textContent = "PC conectado. Escribe artista o título.";
       } else {
         el("agentInfo").textContent = agent
@@ -248,33 +286,109 @@
       "sdf-lab-v2": "SDF LAB V2",
       "sdf-karaoke-pro": "SDF KARAOKE PRO"
     };
-
     const QUALITY_NOTES = {
       "original": "ORIGINAL · render CDG clásico, máxima compatibilidad.",
       "sdf-lab-v2": "SDF LAB V2 · suavizado SDF con halo, corte, gamma y escala 8×.",
       "sdf-karaoke-pro": "SDF KARAOKE PRO · SDF avanzado con gradiente, contorno y sombra."
     };
+    const BG_LABELS = {
+      black: "NEGRO",
+      waves: "ONDAS",
+      glow: "GLOW",
+      gradient: "GRADIENTE",
+      particles: "PARTÍCULAS"
+    };
+    const BG_NOTES = {
+      black: "NEGRO · fondo clásico. Las letras CDG se renderizan como capa transparente.",
+      waves: "ONDAS · bandas luminosas suaves generadas por código.",
+      glow: "GLOW · luces difusas en movimiento, estilo escenario.",
+      gradient: "GRADIENTE · color profundo animado, ligero y continuo.",
+      particles: "PARTÍCULAS · puntos luminosos suaves sobre fondo oscuro."
+    };
+    const BG_QUALITY_NOTES = {
+      light: "LIGERO · 20 FPS y menor resolución interna para TVs de entrada.",
+      normal: "NORMAL · equilibrio entre fluidez y calidad visual.",
+      premium: "PREMIUM · hasta 60 FPS; la TV puede bajar automáticamente si detecta carga."
+    };
+    const VIDEO_QUALITY_NOTES = {
+      auto: "AUTO · hasta 720p, manteniendo el tamaño del demo bajo control.",
+      "360": "360p · menor consumo y preparación más rápida.",
+      "540": "540p · punto medio para redes o TVs moderadas.",
+      "720": "720p · máxima calidad de video del LAB."
+    };
 
-    function setCdgQuality(mode) {
+    function emitPlayerSettings(patch) {
+      if (!roomCode) return;
+      socket.emit("player:settings", patch, (response) => {
+        if (!response?.ok) simpleLog("No se pudo aplicar ajuste en TV", response || {});
+      });
+    }
+
+    function setCdgQuality(mode, notify = true) {
       if (!QUALITY_LABELS[mode]) mode = "original";
       selectedCdgQuality = mode;
       localStorage.setItem("kitkaraoke-cdg-quality", mode);
-
       document.querySelectorAll("#cdgQualitySwitch .quality-btn").forEach((button) => {
         button.classList.toggle("active", button.dataset.quality === mode);
       });
-
       el("cdgQualityNote").textContent = QUALITY_NOTES[mode];
-      simpleLog("Calidad CDG seleccionada", {
-        mode,
-        label: QUALITY_LABELS[mode]
+      if (notify) emitPlayerSettings({ cdgQuality: mode });
+      simpleLog("Calidad CDG seleccionada", { mode, label: QUALITY_LABELS[mode] });
+    }
+
+    function setCdgBackground(mode, notify = true) {
+      if (!BG_LABELS[mode]) mode = "black";
+      selectedCdgBackground = mode;
+      localStorage.setItem("kitkaraoke-cdg-background", mode);
+      document.querySelectorAll("#cdgBackgroundSwitch .quality-btn").forEach((button) => {
+        button.classList.toggle("active", button.dataset.bg === mode);
       });
+      el("cdgBackgroundNote").textContent = BG_NOTES[mode];
+      if (notify) emitPlayerSettings({ cdgBackground: mode });
+      simpleLog("Fondo CDG seleccionado", { mode, label: BG_LABELS[mode] });
+    }
+
+    function setBackgroundQuality(mode, notify = true) {
+      if (!BG_QUALITY_NOTES[mode]) mode = "normal";
+      selectedBackgroundQuality = mode;
+      localStorage.setItem("kitkaraoke-bg-quality", mode);
+      document.querySelectorAll("#backgroundQualitySwitch .quality-btn").forEach((button) => {
+        button.classList.toggle("active", button.dataset.bgQuality === mode);
+      });
+      el("backgroundQualityNote").textContent = BG_QUALITY_NOTES[mode];
+      if (notify) emitPlayerSettings({ backgroundQuality: mode });
+      simpleLog("Rendimiento de fondo seleccionado", { mode });
+    }
+
+    function setVideoQuality(mode, notify = true) {
+      if (!VIDEO_QUALITY_NOTES[mode]) mode = "auto";
+      selectedVideoQuality = mode;
+      localStorage.setItem("kitkaraoke-video-quality", mode);
+      document.querySelectorAll("#videoQualitySwitch .quality-btn").forEach((button) => {
+        button.classList.toggle("active", button.dataset.videoQuality === mode);
+      });
+      el("videoQualityNote").textContent = VIDEO_QUALITY_NOTES[mode];
+      if (notify) emitPlayerSettings({ videoQuality: mode });
+      simpleLog("Calidad de video seleccionada", { mode });
     }
 
     document.querySelectorAll("#cdgQualitySwitch .quality-btn").forEach((button) => {
       button.addEventListener("click", () => setCdgQuality(button.dataset.quality));
     });
-    setCdgQuality(selectedCdgQuality);
+    document.querySelectorAll("#cdgBackgroundSwitch .quality-btn").forEach((button) => {
+      button.addEventListener("click", () => setCdgBackground(button.dataset.bg));
+    });
+    document.querySelectorAll("#backgroundQualitySwitch .quality-btn").forEach((button) => {
+      button.addEventListener("click", () => setBackgroundQuality(button.dataset.bgQuality));
+    });
+    document.querySelectorAll("#videoQualitySwitch .quality-btn").forEach((button) => {
+      button.addEventListener("click", () => setVideoQuality(button.dataset.videoQuality));
+    });
+
+    setCdgQuality(selectedCdgQuality, false);
+    setCdgBackground(selectedCdgBackground, false);
+    setBackgroundQuality(selectedBackgroundQuality, false);
+    setVideoQuality(selectedVideoQuality, false);
 
     socket.on("connect", () => {
       el("dot").classList.add("online");
@@ -296,6 +410,12 @@
       if (!roomCode && room.hasDj) return;
       updateStage(room);
       setAgentState(room.agent || null);
+      if (room.settings) {
+        setCdgQuality(room.settings.cdgQuality || selectedCdgQuality, false);
+        setCdgBackground(room.settings.cdgBackground || selectedCdgBackground, false);
+        setBackgroundQuality(room.settings.backgroundQuality || selectedBackgroundQuality, false);
+        setVideoQuality(room.settings.videoQuality || selectedVideoQuality, false);
+      }
     });
 
     socket.on("diagnostic:event", (entry) => {
@@ -385,6 +505,9 @@
         format: item.format,
         audio: item.audio || null,
         cdgQuality: String(item.format).toUpperCase() === "CDG" ? selectedCdgQuality : null,
+        cdgBackground: String(item.format).toUpperCase() === "CDG" ? selectedCdgBackground : null,
+        backgroundQuality: String(item.format).toUpperCase() === "CDG" ? selectedBackgroundQuality : null,
+        videoQuality: String(item.format).toUpperCase() === "CDG" ? null : selectedVideoQuality,
         source: "KITKARAOKE_AGENT"
       };
 
