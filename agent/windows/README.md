@@ -1,37 +1,50 @@
-# KITKARAOKE Agent para Windows — LAB
+# KITKARAOKE Agent para Windows — LAB V0.3
 
-Esta es la primera versión del agente local para el Demo Server.
+Esta versión agrega preparación y transporte real de demos.
 
 ## Qué hace
 
-1. El usuario selecciona **una carpeta raíz autorizada**.
-2. El agente recorre esa carpeta y detecta:
-   - videos MP4 (también MKV/WEBM/MOV/AVI para diagnóstico);
-   - archivos CDG;
-   - parejas CDG + WAV/MP3/M4A/FLAC con el mismo nombre.
-3. Se conecta **desde la PC hacia** `https://demodj.kitkaraoke.com`.
-4. OVH devuelve un código de seis caracteres.
-5. Ese código se escribe en el Panel DJ para vincular la PC.
-6. Las búsquedas del Panel DJ se resuelven dentro del índice local.
+1. Selecciona una carpeta raíz autorizada.
+2. Indexa MP4 y parejas CDG + WAV/MP3/M4A/AAC/OGG/FLAC.
+3. Se conecta desde la PC hacia `https://demodj.kitkaraoke.com`.
+4. Recibe búsquedas del Panel DJ sin exponer rutas del disco.
+5. Cuando el DJ pulsa **Preparar demo**:
+   - CDG: recorta el flujo CDG y convierte el audio a AAC 160 kbps;
+   - MP4: genera H.264/AAC 720p con `faststart`;
+   - sube solo ese demo a una caché temporal de OVH;
+   - cada reproducción usa un `traceId`.
+6. La TV descarga el demo completo y recién queda en estado **READY**.
 
-## Protección actual
+## Diseño anti-lag
 
-- No abre puertos entrantes en Windows.
-- No comparte discos ni carpetas por SMB/HTTP.
-- No envía rutas absolutas del disco al Panel DJ.
-- OVH solo recibe metadatos seguros: ID opaco, artista, título y formato.
-- **Esta versión todavía NO transmite el MP4/CDG/audio.** Eso será la siguiente fase.
+La TV reproduce desde un Blob local ya precargado. Durante PLAY no depende de que continúe llegando audio por Internet. En CDG, el reloj maestro es `audio.currentTime`; el gráfico sigue la posición real del audio.
 
-## Inicio rápido
+## Diagnóstico
+
+El Agent informa eventos como:
+
+- AGENT_PREPARE_START
+- AGENT_MEDIA_FOUND
+- AGENT_CDG_SLICE_READY
+- AGENT_AUDIO_TRANSCODE_READY
+- AGENT_MP4_TRANSCODE_READY
+- AGENT_UPLOAD_START
+- AGENT_UPLOAD_COMPLETE
+- AGENT_PREPARE_COMPLETE
+- AGENT_PREPARE_ERROR
+
+No se envían tokens ni rutas completas del disco a los logs remotos.
+
+## Inicio
 
 1. Descomprime el ZIP.
 2. Ejecuta `INICIAR_KITKARAOKE_AGENT.bat`.
-3. En el primer inicio instalará sus dependencias Python en una carpeta local `.venv`.
-4. Pulsa **Elegir carpeta**.
-5. Espera a que termine el índice.
-6. Copia el código de seis caracteres.
-7. Abre `https://demodj.kitkaraoke.com`, crea una sala y usa **Vincular PC**.
-8. Busca una canción real.
+3. El primer inicio crea `.venv` e instala las dependencias, incluido un runtime FFmpeg para el Agent.
+4. Selecciona tu carpeta.
+5. Copia el código del Agent al Panel DJ.
+6. Busca una canción y pulsa **Preparar demo**.
+7. Espera a que el Panel marque **READY · SIN LAG**.
+8. Pulsa PLAY.
 
 ## Requisito
 
