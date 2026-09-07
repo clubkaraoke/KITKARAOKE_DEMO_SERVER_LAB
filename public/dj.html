@@ -11,7 +11,7 @@
     <div class="topbar">
       <div>
         <div class="brand">KITKARAOKE · DEMO SERVER LAB</div>
-        <div class="muted">Panel DJ — Fase 1</div>
+        <div class="muted">Panel DJ — Fase 2 · Agente PC</div>
       </div>
       <div class="badge"><span id="dot" class="dot"></span><span id="connection">Conectando…</span></div>
     </div>
@@ -20,7 +20,7 @@
       <div class="card">
         <div class="kicker">Sala temporal</div>
         <h1>Control DJ</h1>
-        <p class="muted">Crea una sala y escribe el código en la TV. En esta fase probamos la comunicación en tiempo real sin exponer archivos de karaoke.</p>
+        <p class="muted">Crea una sala, vincula la TV y luego conecta el agente de tu PC para buscar en tu catálogo local.</p>
 
         <button id="createRoom">Crear sala demo</button>
 
@@ -35,18 +35,57 @@
       </div>
 
       <div class="card">
-        <div class="kicker">Prueba de comandos</div>
-        <h2>Reproductor remoto</h2>
+        <div class="kicker">Reproductor remoto</div>
+        <h2>Control de TV</h2>
         <div class="controls">
           <button id="play" disabled>▶ Play</button>
           <button id="pause" class="secondary" disabled>⏸ Pausa</button>
           <button id="stop" class="danger" disabled>■ Stop</button>
-          <button id="load" class="secondary" disabled>Preparar demo</button>
+          <button id="load" class="secondary" disabled>Demo de prueba</button>
         </div>
 
         <div style="height:18px"></div>
         <h2>Diagnóstico</h2>
         <div id="log" class="log">Esperando conexión…</div>
+      </div>
+    </section>
+
+    <section class="agent-grid stack">
+      <div class="card">
+        <div class="kicker">Servidor local</div>
+        <h2>KITKARAOKE Agent</h2>
+        <p class="muted">El agente corre en tu PC y solo sale hacia OVH. El servidor web no puede explorar tu disco directamente.</p>
+
+        <div class="agent-state">
+          <div>
+            <strong id="agentStatus">NO VINCULADO</strong>
+            <div id="agentInfo" class="inline-note">Abre el agente en tu PC y copia su código.</div>
+          </div>
+          <span id="agentDot" class="dot"></span>
+        </div>
+
+        <div class="row">
+          <input id="agentCode" maxlength="6" autocomplete="off" placeholder="Código Agent">
+          <button id="linkAgent" disabled>Vincular PC</button>
+        </div>
+        <div class="inline-note">El código queda asociado únicamente a esta sala mientras el agente esté online.</div>
+
+        <div class="status-grid">
+          <div class="stat"><strong id="agentSongs">0</strong><span>Canciones</span></div>
+          <div class="stat"><strong id="agentVideo">0</strong><span>Video</span></div>
+          <div class="stat"><strong id="agentCdg">0</strong><span>CDG + audio</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="kicker">Catálogo de tu disco</div>
+        <h2>Buscar karaoke real</h2>
+        <div class="row">
+          <input id="searchQuery" autocomplete="off" placeholder="Ej. Armonía 10 Cervecero">
+          <button id="searchButton" disabled>Buscar</button>
+        </div>
+        <div id="searchNote" class="inline-note">Vincula primero el KITKARAOKE Agent.</div>
+        <div id="results" class="results"></div>
       </div>
     </section>
   </main>
@@ -55,6 +94,7 @@
   <script>
     const socket = io();
     let roomCode = null;
+    let agentOnline = false;
 
     const el = (id) => document.getElementById(id);
     const logEl = el("log");
@@ -70,6 +110,30 @@
       commandButtons.forEach((button) => { button.disabled = !enabled; });
     }
 
+    function setAgentState(agent) {
+      agentOnline = Boolean(agent && agent.online);
+      el("agentDot").classList.toggle("online", agentOnline);
+      el("searchButton").disabled = !agentOnline;
+      el("agentStatus").textContent = agentOnline ? "PC ONLINE" : (agent ? "PC OFFLINE" : "NO VINCULADO");
+
+      const summary = agent && agent.summary ? agent.summary : {};
+      el("agentSongs").textContent = Number(summary.songs || 0).toLocaleString();
+      el("agentVideo").textContent = Number(summary.video || 0).toLocaleString();
+      el("agentCdg").textContent = Number(summary.cdgWithAudio || 0).toLocaleString();
+
+      if (agentOnline) {
+        el("agentInfo").textContent =
+          (agent.name || "KITKARAOKE Agent") + " · código " + agent.code;
+        el("searchNote").textContent = "PC conectado. Escribe artista o título.";
+      } else if (agent) {
+        el("agentInfo").textContent = "Código " + agent.code + " · agente desconectado";
+        el("searchNote").textContent = "El agente está offline.";
+      } else {
+        el("agentInfo").textContent = "Abre el agente en tu PC y copia su código.";
+        el("searchNote").textContent = "Vincula primero el KITKARAOKE Agent.";
+      }
+    }
+
     socket.on("connect", () => {
       el("dot").classList.add("online");
       el("connection").textContent = "Servidor conectado";
@@ -80,19 +144,38 @@
       el("dot").classList.remove("online");
       el("connection").textContent = "Servidor desconectado";
       setCommands(false);
+      el("searchButton").disabled = true;
       log("Socket desconectado");
     });
 
     socket.on("room:state", (room) => {
       if (roomCode && room.code !== roomCode) return;
+      if (!roomCode && room.hasDj) return;
       el("tvCount").textContent = room.tvCount;
       el("playback").textContent = String(room.playback.state || "idle").toUpperCase();
       el("roomStatus").textContent = room.hasDj ? "ACTIVA" : "SIN DJ";
       setCommands(Boolean(roomCode));
+      setAgentState(room.agent || null);
     });
 
     socket.on("player:status", (status) => {
       log("Estado recibido desde TV", status);
+    });
+
+    socket.on("agent:search:result", (payload) => {
+      el("searchNote").textContent =
+        payload.totalMatches + " coincidencia(s) · " + payload.elapsedMs + " ms";
+      renderResults(payload.results || []);
+      log("Resultados recibidos del Agent", {
+        requestId: payload.requestId,
+        results: (payload.results || []).length,
+        elapsedMs: payload.elapsedMs
+      });
+    });
+
+    socket.on("agent:search:error", (payload) => {
+      el("searchNote").textContent = "La búsqueda no respondió a tiempo.";
+      log("Error de búsqueda Agent", payload);
     });
 
     socket.on("room:expired", () => {
@@ -100,6 +183,8 @@
       roomCode = null;
       el("roomCode").textContent = "------";
       setCommands(false);
+      el("linkAgent").disabled = true;
+      setAgentState(null);
     });
 
     el("createRoom").addEventListener("click", () => {
@@ -112,8 +197,33 @@
         el("roomCode").textContent = roomCode;
         el("tvCount").textContent = response.room.tvCount;
         el("roomStatus").textContent = "ACTIVA";
+        el("linkAgent").disabled = false;
         setCommands(true);
+        setAgentState(response.room.agent || null);
         log("Sala creada", response.room);
+      });
+    });
+
+    el("agentCode").addEventListener("input", (event) => {
+      event.target.value = event.target.value
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 6);
+    });
+
+    el("linkAgent").addEventListener("click", () => {
+      const code = el("agentCode").value.trim().toUpperCase();
+      if (!roomCode) return;
+
+      socket.emit("agent:link", { agentCode: code }, (response) => {
+        if (!response.ok) {
+          el("agentStatus").textContent = "NO ENCONTRADO";
+          el("agentInfo").textContent = response.error || "No se pudo vincular";
+          log("No se pudo vincular Agent", response);
+          return;
+        }
+        setAgentState(response.room.agent);
+        log("KITKARAOKE Agent vinculado", response.room.agent);
       });
     });
 
@@ -123,6 +233,77 @@
         log("Comando " + command, response);
       });
     }
+
+    function renderResults(results) {
+      const box = el("results");
+      box.innerHTML = "";
+
+      if (!results.length) {
+        box.innerHTML = '<div class="muted">No se encontraron coincidencias.</div>';
+        return;
+      }
+
+      results.forEach((item) => {
+        const row = document.createElement("div");
+        row.className = "result";
+
+        const left = document.createElement("div");
+        const title = document.createElement("div");
+        title.className = "result-title";
+        title.textContent = item.artist
+          ? item.artist + " - " + item.title
+          : item.title;
+
+        const meta = document.createElement("div");
+        meta.className = "result-meta";
+        meta.textContent =
+          item.format +
+          (item.audio ? " + " + item.audio : "") +
+          " · archivo localizado en tu PC";
+
+        left.appendChild(title);
+        left.appendChild(meta);
+
+        const button = document.createElement("button");
+        button.textContent = "Cargar en TV";
+        button.addEventListener("click", () => {
+          send("LOAD", {
+            media: {
+              id: item.id,
+              title: item.artist ? item.artist + " - " + item.title : item.title,
+              format: item.format,
+              audio: item.audio || null,
+              source: "KITKARAOKE_AGENT"
+            }
+          });
+        });
+
+        row.appendChild(left);
+        row.appendChild(button);
+        box.appendChild(row);
+      });
+    }
+
+    function search() {
+      const query = el("searchQuery").value.trim();
+      if (!agentOnline || query.length < 2) return;
+      el("searchNote").textContent = "Buscando en tu PC…";
+      el("results").innerHTML = "";
+
+      socket.emit("agent:search", { query, limit: 50 }, (response) => {
+        if (!response.ok) {
+          el("searchNote").textContent = response.error || "No se pudo buscar";
+          log("Error enviando búsqueda", response);
+          return;
+        }
+        log("Búsqueda enviada al Agent", response);
+      });
+    }
+
+    el("searchButton").addEventListener("click", search);
+    el("searchQuery").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") search();
+    });
 
     el("play").addEventListener("click", () => send("PLAY"));
     el("pause").addEventListener("click", () => send("PAUSE"));
