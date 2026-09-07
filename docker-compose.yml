@@ -1,0 +1,17 @@
+services:
+  demo-server:
+    build: .
+    container_name: kitkaraoke-demo-server-lab
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      SESSION_TTL_MINUTES: 120
+    ports:
+      - "127.0.0.1:8795:3000"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 10s
