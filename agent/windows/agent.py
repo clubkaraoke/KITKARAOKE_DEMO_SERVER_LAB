@@ -4,7 +4,10 @@ import hashlib
 import json
 import os
 import queue
+import shutil
 import socket
+import subprocess
+import tempfile
 import threading
 import time
 import unicodedata
@@ -12,23 +15,24 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+import imageio_ffmpeg
+import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
-AUDIO_EXTS = [".wav", ".mp3", ".m4a", ".flac"]
+AUDIO_EXTS = [".wav", ".mp3", ".m4a", ".aac", ".ogg", ".flac"]
 CDG_EXT = ".cdg"
+CDG_PACKETS_PER_SECOND = 300
+CDG_PACKET_SIZE = 24
 
 
 def app_data_dir() -> Path:
     base = os.environ.get("APPDATA")
-    if base:
-        root = Path(base)
-    else:
-        root = Path.home() / ".config"
+    root = Path(base) if base else Path.home() / ".config"
     path = root / "KITKARAOKE Agent"
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -40,9 +44,7 @@ CONFIG_PATH = app_data_dir() / "config.json"
 def normalize_text(value: str) -> str:
     raw = unicodedata.normalize("NFD", value or "")
     raw = "".join(ch for ch in raw if unicodedata.category(ch) != "Mn")
-    chars = []
-    for ch in raw.lower():
-        chars.append(ch if ch.isalnum() else " ")
+    chars = [ch if ch.isalnum() else " " for ch in raw.lower()]
     return " ".join("".join(chars).split())
 
 
@@ -65,6 +67,7 @@ class Catalog:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._items: list[dict] = []
+        self._by_id: dict[str, dict] = {}
         self._summary = {
             "files": 0,
             "songs": 0,
@@ -76,11 +79,17 @@ class Catalog:
     def replace(self, items: list[dict], summary: dict) -> None:
         with self._lock:
             self._items = items
+            self._by_id = {item["id"]: item for item in items}
             self._summary = summary
 
     def summary(self) -> dict:
         with self._lock:
             return dict(self._summary)
+
+    def get(self, media_id: str) -> dict | None:
+        with self._lock:
+            item = self._by_id.get(str(media_id or ""))
+            return dict(item) if item else None
 
     def search(self, query: str, limit: int = 50) -> tuple[list[dict], int]:
         needle = normalize_text(query)
@@ -108,12 +117,10 @@ class Catalog:
                 if key.startswith(needle):
                     score += 25
                 score += max(0, 20 - len(key) // 30)
-
                 candidates.append((score, item))
 
             candidates.sort(key=lambda pair: (-pair[0], pair[1]["title"].lower()))
             total = len(candidates)
-
             safe = []
             for _, item in candidates[: max(1, min(80, limit))]:
                 safe.append(
@@ -133,8 +140,8 @@ class AgentApp:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title(f"{APP_NAME} {APP_VERSION}")
-        self.root.geometry("780x620")
-        self.root.minsize(720, 560)
+        self.root.geometry("820x700")
+        self.root.minsize(760, 620)
 
         self.catalog = Catalog()
         self.config = self.load_config()
@@ -151,6 +158,7 @@ class AgentApp:
         self.registered = False
         self.stop_event = threading.Event()
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self.ffmpeg_path = self.detect_ffmpeg()
 
         self.server_var = tk.StringVar(value=self.config.get("server", DEFAULT_SERVER))
         self.folder_var = tk.StringVar(value=self.config.get("folder", ""))
@@ -158,6 +166,9 @@ class AgentApp:
         self.connection_var = tk.StringVar(value="DESCONECTADO")
         self.scan_var = tk.StringVar(value="Sin índice")
         self.counts_var = tk.StringVar(value="0 canciones · 0 video · 0 CDG+audio")
+        self.prepare_var = tk.StringVar(
+            value="FFmpeg listo" if self.ffmpeg_path else "FFmpeg no disponible"
+        )
 
         self.build_ui()
         self.bind_socket_events()
@@ -165,10 +176,34 @@ class AgentApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.root.after(150, self.flush_logs)
 
+        if self.ffmpeg_path:
+            self.add_log("Motor FFmpeg listo para demos CDG/MP4.")
+        else:
+            self.add_log("ERROR: no se encontró FFmpeg.")
+
         if self.folder_var.get():
             self.start_scan(auto=True)
 
         self.root.after(600, self.connect_async)
+
+    def detect_ffmpeg(self) -> str:
+        system = shutil.which("ffmpeg")
+        if system:
+            return system
+        try:
+            return imageio_ffmpeg.get_ffmpeg_exe()
+        except Exception:
+            return ""
+
+    def capabilities(self) -> dict:
+        return {
+            "prepareMedia": bool(self.ffmpeg_path),
+            "ffmpeg": bool(self.ffmpeg_path),
+            "cdgAacDemo": bool(self.ffmpeg_path),
+            "mp4H264Demo": bool(self.ffmpeg_path),
+            "fullPreloadRecommended": True,
+            "version": APP_VERSION,
+        }
 
     def load_config(self) -> dict:
         try:
@@ -192,6 +227,7 @@ class AgentApp:
             json.dumps(data, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        self.config.update(data)
 
     def build_ui(self) -> None:
         style = ttk.Style()
@@ -210,7 +246,7 @@ class AgentApp:
         ).pack(anchor="w")
         ttk.Label(
             outer,
-            text="Servidor local seguro para el DEMO SERVER LAB",
+            text="Demo Server LAB · búsqueda + preparación real + diagnóstico",
             font=("Segoe UI", 10),
         ).pack(anchor="w", pady=(0, 16))
 
@@ -264,24 +300,42 @@ class AgentApp:
             font=("Segoe UI", 10, "bold"),
         ).pack(anchor="w", pady=(3, 0))
 
+        engine = ttk.LabelFrame(outer, text="Motor de demos", padding=12)
+        engine.pack(fill="x", pady=(14, 0))
+        ttk.Label(
+            engine,
+            textvariable=self.prepare_var,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(anchor="w")
+        ttk.Label(
+            engine,
+            text=(
+                "CDG: recorte + audio AAC 160 kbps. "
+                "MP4: H.264/AAC 720p con faststart. "
+                "La TV precarga el demo completo antes de PLAY."
+            ),
+            wraplength=750,
+            justify="left",
+        ).pack(anchor="w", pady=(4, 0))
+
         privacy = ttk.LabelFrame(outer, text="Protección", padding=12)
         privacy.pack(fill="x", pady=(14, 0))
         ttk.Label(
             privacy,
             text=(
                 "Solo se indexa la carpeta elegida. Las rutas completas de Windows "
-                "NO se envían a OVH. El panel recibe únicamente ID, artista, título "
-                "y formato. Esta versión todavía no transmite archivos."
+                "NO se envían a OVH. Los uploads usan un token temporal por reproducción "
+                "y caducan en la caché del LAB."
             ),
-            wraplength=710,
+            wraplength=750,
             justify="left",
         ).pack(anchor="w")
 
-        logs = ttk.LabelFrame(outer, text="Logs", padding=8)
+        logs = ttk.LabelFrame(outer, text="Logs permanentes del Agent", padding=8)
         logs.pack(fill="both", expand=True, pady=(14, 0))
         self.log_text = tk.Text(
             logs,
-            height=14,
+            height=16,
             wrap="word",
             font=("Consolas", 9),
             state="disabled",
@@ -328,18 +382,16 @@ class AgentApp:
             if not auto:
                 messagebox.showinfo(APP_NAME, "Primero selecciona una carpeta.")
             return
-
-        thread = threading.Thread(
+        threading.Thread(
             target=self.scan_folder,
             args=(Path(folder),),
             daemon=True,
-        )
-        thread.start()
+        ).start()
 
     def scan_folder(self, root_path: Path) -> None:
         if not root_path.exists() or not root_path.is_dir():
             self.ui(self.scan_var.set, "La carpeta ya no existe")
-            self.add_log(f"Carpeta no disponible: {root_path}")
+            self.add_log("Carpeta autorizada no disponible.")
             return
 
         started = time.perf_counter()
@@ -357,31 +409,32 @@ class AgentApp:
             for base, _dirs, names in os.walk(root_path):
                 base_path = Path(base)
                 for name in names:
-                    path = base_path / name
-                    ext = path.suffix.lower()
+                    file_path = base_path / name
+                    ext = file_path.suffix.lower()
                     if ext in VIDEO_EXTS or ext == CDG_EXT or ext in AUDIO_EXTS:
-                        all_files.append(path)
+                        all_files.append(file_path)
                         files_seen += 1
 
             by_parent_stem: dict[tuple[str, str], dict[str, Path]] = {}
-            for path in all_files:
-                key = (str(path.parent).lower(), path.stem.lower())
-                by_parent_stem.setdefault(key, {})[path.suffix.lower()] = path
+            for file_path in all_files:
+                key = (str(file_path.parent).lower(), file_path.stem.lower())
+                by_parent_stem.setdefault(key, {})[file_path.suffix.lower()] = file_path
 
-            for path in all_files:
-                ext = path.suffix.lower()
+            for file_path in all_files:
+                ext = file_path.suffix.lower()
 
                 if ext in VIDEO_EXTS:
-                    artist, title = parse_artist_title(path.stem)
-                    key = normalize_text(f"{artist} {title} {path.stem}")
+                    artist, title = parse_artist_title(file_path.stem)
+                    key = normalize_text(f"{artist} {title} {file_path.stem}")
                     items.append(
                         {
-                            "id": stable_id(path),
+                            "id": stable_id(file_path),
                             "artist": artist,
                             "title": title,
                             "format": "MP4" if ext == ".mp4" else ext[1:].upper(),
                             "audio": "",
-                            "_path": str(path),
+                            "_path": str(file_path),
+                            "_audio_path": "",
                             "_key": key,
                             "_title_key": normalize_text(title),
                             "_artist_key": normalize_text(artist),
@@ -395,7 +448,7 @@ class AgentApp:
 
                 cdg_count += 1
                 siblings = by_parent_stem.get(
-                    (str(path.parent).lower(), path.stem.lower()), {}
+                    (str(file_path.parent).lower(), file_path.stem.lower()), {}
                 )
                 audio_path = None
                 audio_ext = ""
@@ -408,16 +461,16 @@ class AgentApp:
                 if audio_path:
                     cdg_with_audio += 1
 
-                artist, title = parse_artist_title(path.stem)
-                key = normalize_text(f"{artist} {title} {path.stem}")
+                artist, title = parse_artist_title(file_path.stem)
+                key = normalize_text(f"{artist} {title} {file_path.stem}")
                 items.append(
                     {
-                        "id": stable_id(path),
+                        "id": stable_id(file_path),
                         "artist": artist,
                         "title": title,
                         "format": "CDG",
                         "audio": audio_ext,
-                        "_path": str(path),
+                        "_path": str(file_path),
                         "_audio_path": str(audio_path) if audio_path else "",
                         "_key": key,
                         "_title_key": normalize_text(title),
@@ -448,12 +501,332 @@ class AgentApp:
                 f"Índice listo: {len(items):,} canciones; "
                 f"{video_count:,} video; {cdg_with_audio:,} CDG+audio."
             )
-
             if self.connected and self.registered:
                 self.send_heartbeat()
         except Exception as exc:
             self.ui(self.scan_var.set, "Error al indexar")
             self.add_log(f"ERROR indexando: {exc}")
+
+    def emit_diag(
+        self,
+        trace_id: str,
+        event: str,
+        data: dict | None = None,
+        level: str = "info",
+        room_code: str = "",
+    ) -> None:
+        clean = data or {}
+        self.add_log(
+            f"{event}"
+            + (f" · trace {trace_id[:8]}" if trace_id else "")
+            + (f" · {json.dumps(clean, ensure_ascii=False)}" if clean else "")
+        )
+        if not self.connected:
+            return
+        try:
+            self.sio.emit(
+                "agent:diagnostic",
+                {
+                    "traceId": trace_id,
+                    "roomCode": room_code,
+                    "event": event,
+                    "data": clean,
+                    "level": level,
+                },
+            )
+        except Exception:
+            pass
+
+    def run_ffmpeg(self, args: list[str]) -> None:
+        if not self.ffmpeg_path:
+            raise RuntimeError("FFmpeg no está disponible")
+        command = [self.ffmpeg_path, "-hide_banner", "-loglevel", "error", "-y"] + args
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "FFmpeg error").strip()
+            raise RuntimeError(detail[-600:])
+
+    def prepare_cdg(
+        self,
+        item: dict,
+        duration: int,
+        workdir: Path,
+        trace_id: str,
+        room_code: str,
+    ) -> dict[str, Path]:
+        cdg_source = Path(item["_path"])
+        audio_source = Path(item.get("_audio_path") or "")
+        if not cdg_source.exists():
+            raise FileNotFoundError("El CDG ya no existe en la carpeta autorizada")
+        if not audio_source.exists():
+            raise FileNotFoundError("El CDG no tiene audio emparejado")
+
+        cdg_out = workdir / "demo.cdg"
+        audio_out = workdir / "demo.m4a"
+
+        target_bytes = duration * CDG_PACKETS_PER_SECOND * CDG_PACKET_SIZE
+        started = time.perf_counter()
+        with cdg_source.open("rb") as src, cdg_out.open("wb") as dst:
+            remaining = target_bytes
+            while remaining > 0:
+                chunk = src.read(min(1024 * 1024, remaining))
+                if not chunk:
+                    break
+                dst.write(chunk)
+                remaining -= len(chunk)
+
+        self.emit_diag(
+            trace_id,
+            "AGENT_CDG_SLICE_READY",
+            {
+                "bytes": cdg_out.stat().st_size,
+                "elapsedMs": int((time.perf_counter() - started) * 1000),
+                "duration": duration,
+            },
+            room_code=room_code,
+        )
+
+        started = time.perf_counter()
+        self.run_ffmpeg(
+            [
+                "-i", str(audio_source),
+                "-t", str(duration),
+                "-vn",
+                "-c:a", "aac",
+                "-b:a", "160k",
+                "-movflags", "+faststart",
+                str(audio_out),
+            ]
+        )
+        self.emit_diag(
+            trace_id,
+            "AGENT_AUDIO_TRANSCODE_READY",
+            {
+                "codec": "AAC",
+                "bitrate": "160k",
+                "bytes": audio_out.stat().st_size,
+                "elapsedMs": int((time.perf_counter() - started) * 1000),
+            },
+            room_code=room_code,
+        )
+        return {"cdg": cdg_out, "audio": audio_out}
+
+    def prepare_video(
+        self,
+        item: dict,
+        duration: int,
+        workdir: Path,
+        trace_id: str,
+        room_code: str,
+    ) -> dict[str, Path]:
+        source = Path(item["_path"])
+        if not source.exists():
+            raise FileNotFoundError("El video ya no existe en la carpeta autorizada")
+
+        video_out = workdir / "demo.mp4"
+        started = time.perf_counter()
+        self.run_ffmpeg(
+            [
+                "-i", str(source),
+                "-t", str(duration),
+                "-vf", "scale=-2:720:force_original_aspect_ratio=decrease",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "23",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "160k",
+                "-movflags", "+faststart",
+                str(video_out),
+            ]
+        )
+        self.emit_diag(
+            trace_id,
+            "AGENT_MP4_TRANSCODE_READY",
+            {
+                "videoCodec": "H264",
+                "audioCodec": "AAC",
+                "maxHeight": 720,
+                "faststart": True,
+                "bytes": video_out.stat().st_size,
+                "elapsedMs": int((time.perf_counter() - started) * 1000),
+            },
+            room_code=room_code,
+        )
+        return {"video": video_out}
+
+    def upload_part(
+        self,
+        url: str,
+        token: str,
+        file_path: Path,
+        kind: str,
+        trace_id: str,
+        room_code: str,
+    ) -> tuple[int, int]:
+        size = file_path.stat().st_size
+        mime = {
+            "cdg": "application/octet-stream",
+            "audio": "audio/mp4",
+            "video": "video/mp4",
+        }.get(kind, "application/octet-stream")
+        started = time.perf_counter()
+
+        self.emit_diag(
+            trace_id,
+            "AGENT_UPLOAD_START",
+            {"kind": kind, "bytes": size},
+            room_code=room_code,
+        )
+
+        with file_path.open("rb") as handle:
+            response = requests.put(
+                url,
+                data=handle,
+                headers={
+                    "X-Upload-Token": token,
+                    "Content-Type": mime,
+                    "Content-Length": str(size),
+                },
+                timeout=(15, 180),
+            )
+        if response.status_code >= 400:
+            raise RuntimeError(
+                f"Upload {kind} HTTP {response.status_code}: {response.text[:180]}"
+            )
+
+        elapsed_ms = int((time.perf_counter() - started) * 1000)
+        self.emit_diag(
+            trace_id,
+            "AGENT_UPLOAD_COMPLETE",
+            {
+                "kind": kind,
+                "bytes": size,
+                "elapsedMs": elapsed_ms,
+                "mbps": round((size * 8 / 1_000_000) / max(elapsed_ms / 1000, 0.001), 2),
+            },
+            room_code=room_code,
+        )
+        return size, elapsed_ms
+
+    def prepare_media(self, payload: dict) -> None:
+        trace_id = str(payload.get("traceId") or "")
+        room_code = str(payload.get("roomCode") or "")
+        media = payload.get("media") or {}
+        media_id = str(media.get("id") or "")
+        duration = int(payload.get("duration") or 45)
+        uploads = payload.get("uploads") or {}
+        upload_token = str(payload.get("uploadToken") or "")
+        total_started = time.perf_counter()
+
+        if duration not in (30, 45, 60):
+            duration = 45
+
+        try:
+            if not self.ffmpeg_path:
+                raise RuntimeError("FFmpeg no disponible en el Agent")
+
+            self.ui(self.prepare_var.set, "Preparando demo…")
+            self.emit_diag(
+                trace_id,
+                "AGENT_PREPARE_START",
+                {
+                    "mediaId": media_id,
+                    "title": str(media.get("title") or ""),
+                    "format": str(media.get("format") or ""),
+                    "duration": duration,
+                },
+                room_code=room_code,
+            )
+
+            lookup_started = time.perf_counter()
+            item = self.catalog.get(media_id)
+            if not item:
+                raise FileNotFoundError("MEDIA_ID_NOT_FOUND_IN_LOCAL_CATALOG")
+
+            self.emit_diag(
+                trace_id,
+                "AGENT_MEDIA_FOUND",
+                {
+                    "format": item["format"],
+                    "audio": item["audio"],
+                    "elapsedMs": int((time.perf_counter() - lookup_started) * 1000),
+                },
+                room_code=room_code,
+            )
+
+            with tempfile.TemporaryDirectory(prefix="kitkaraoke-demo-") as temp:
+                workdir = Path(temp)
+                if item["format"] == "CDG":
+                    parts = self.prepare_cdg(
+                        item, duration, workdir, trace_id, room_code
+                    )
+                else:
+                    parts = self.prepare_video(
+                        item, duration, workdir, trace_id, room_code
+                    )
+
+                total_bytes = 0
+                upload_ms = 0
+                for kind, file_path in parts.items():
+                    url = str(uploads.get(kind) or "")
+                    if not url:
+                        raise RuntimeError(f"Falta URL temporal para {kind}")
+                    size, elapsed = self.upload_part(
+                        url,
+                        upload_token,
+                        file_path,
+                        kind,
+                        trace_id,
+                        room_code,
+                    )
+                    total_bytes += size
+                    upload_ms += elapsed
+
+            total_ms = int((time.perf_counter() - total_started) * 1000)
+            metrics = {
+                "totalMs": total_ms,
+                "uploadMs": upload_ms,
+                "totalBytes": total_bytes,
+                "duration": duration,
+            }
+            self.emit_diag(
+                trace_id,
+                "AGENT_PREPARE_COMPLETE",
+                metrics,
+                room_code=room_code,
+            )
+            self.sio.emit(
+                "agent:prepare:complete",
+                {"traceId": trace_id, "metrics": metrics},
+            )
+            self.ui(self.prepare_var.set, "Demo listo · enviado a OVH")
+        except Exception as exc:
+            error_text = str(exc)
+            self.emit_diag(
+                trace_id,
+                "AGENT_PREPARE_ERROR",
+                {"error": error_text},
+                level="error",
+                room_code=room_code,
+            )
+            try:
+                self.sio.emit(
+                    "agent:prepare:error",
+                    {
+                        "traceId": trace_id,
+                        "code": "AGENT_PREPARE_FAILED",
+                        "error": error_text,
+                    },
+                )
+            except Exception:
+                pass
+            self.ui(self.prepare_var.set, "Error preparando demo")
 
     def bind_socket_events(self) -> None:
         @self.sio.event
@@ -490,7 +863,6 @@ class AgentApp:
                 f'Búsqueda remota "{query_text}" → {total} coincidencia(s) '
                 f"({elapsed_ms} ms)."
             )
-
             self.sio.emit(
                 "agent:search:result",
                 {
@@ -502,6 +874,14 @@ class AgentApp:
                 },
             )
 
+        @self.sio.on("agent:prepare")
+        def on_prepare(payload):
+            threading.Thread(
+                target=self.prepare_media,
+                args=(payload or {},),
+                daemon=True,
+            ).start()
+
     def register_agent(self) -> None:
         if not self.connected:
             return
@@ -511,6 +891,7 @@ class AgentApp:
             "name": f"{APP_NAME} · {socket.gethostname()}",
             "version": APP_VERSION,
             "summary": self.catalog.summary(),
+            "capabilities": self.capabilities(),
         }
 
         def ack(response):
@@ -540,7 +921,10 @@ class AgentApp:
         try:
             self.sio.emit(
                 "agent:heartbeat",
-                {"summary": self.catalog.summary()},
+                {
+                    "summary": self.catalog.summary(),
+                    "capabilities": self.capabilities(),
+                },
             )
         except Exception:
             pass
