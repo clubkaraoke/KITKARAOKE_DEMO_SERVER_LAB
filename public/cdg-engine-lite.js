@@ -118,7 +118,7 @@
   class CdgEngine {
     constructor(canvas, onFrame) {
       this.canvas = canvas;
-      this.ctx = canvas.getContext("2d", { alpha: false });
+      this.ctx = canvas.getContext("2d", { alpha: true });
       this.ctx.imageSmoothingEnabled = false;
       this.canvas.width = VISIBLE_W;
       this.canvas.height = VISIBLE_H;
@@ -128,6 +128,10 @@
       this.processedPacket = 0;
       this.lastRenderAt = 0;
       this.onFrame = typeof onFrame === "function" ? onFrame : null;
+      this.transparentBackground = false;
+      this.renderCount = 0;
+      this.totalRenderMs = 0;
+      this.maxRenderMs = 0;
     }
 
     load(bytes) {
@@ -176,6 +180,7 @@
 
     render(force) {
       if (!this.data && !force) return;
+      const started = performance.now();
       const out = this.imageData.data;
       let o = 0;
       const hFine = Math.min(5, this.decoder.hOffset);
@@ -190,13 +195,41 @@
           out[o] = rgba[0];
           out[o + 1] = rgba[1];
           out[o + 2] = rgba[2];
-          out[o + 3] = 255;
+          out[o + 3] = this.transparentBackground && index === this.decoder.memoryColor ? 0 : 255;
           o += 4;
         }
       }
 
       this.ctx.putImageData(this.imageData, 0, 0);
-      if (this.onFrame) this.onFrame(this.imageData.data, { force: Boolean(force), packet: this.processedPacket });
+      const renderMs = performance.now() - started;
+      this.renderCount += 1;
+      this.totalRenderMs += renderMs;
+      this.maxRenderMs = Math.max(this.maxRenderMs, renderMs);
+      if (this.onFrame) {
+        this.onFrame(this.imageData.data, {
+          force: Boolean(force),
+          packet: this.processedPacket,
+          renderMs: Number(renderMs.toFixed(3)),
+          transparentBackground: this.transparentBackground
+        });
+      }
+    }
+
+    setTransparentBackground(enabled) {
+      const next = Boolean(enabled);
+      if (next === this.transparentBackground) return;
+      this.transparentBackground = next;
+      this.render(true);
+    }
+
+    getMetrics() {
+      return {
+        renderCount: this.renderCount,
+        avgRenderMs: this.renderCount ? Number((this.totalRenderMs / this.renderCount).toFixed(3)) : 0,
+        maxRenderMs: Number(this.maxRenderMs.toFixed(3)),
+        transparentBackground: this.transparentBackground,
+        processedPacket: this.processedPacket
+      };
     }
 
     stop() {
