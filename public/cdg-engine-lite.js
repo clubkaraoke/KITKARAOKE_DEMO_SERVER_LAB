@@ -132,6 +132,9 @@
       this.renderCount = 0;
       this.totalRenderMs = 0;
       this.maxRenderMs = 0;
+      this.visibleIndex = new Uint8Array(VISIBLE_W * VISIBLE_H);
+      this.backgroundMask = new Uint8Array(VISIBLE_W * VISIBLE_H);
+      this.backgroundStack = new Int32Array(VISIBLE_W * VISIBLE_H);
     }
 
     load(bytes) {
@@ -190,14 +193,46 @@
         const sy = Math.min(HEIGHT - 1, VISIBLE_Y + y + vFine);
         for (let x = 0; x < VISIBLE_W; x += 1) {
           const sx = Math.min(WIDTH - 1, VISIBLE_X + x + hFine);
-          const index = this.decoder.frame[sy * WIDTH + sx] & 0x0f;
-          const rgba = this.decoder.palette[index] || [0, 0, 0, 255];
-          out[o] = rgba[0];
-          out[o + 1] = rgba[1];
-          out[o + 2] = rgba[2];
-          out[o + 3] = this.transparentBackground && index === this.decoder.memoryColor ? 0 : 255;
-          o += 4;
+          this.visibleIndex[y * VISIBLE_W + x] = this.decoder.frame[sy * WIDTH + sx] & 0x0f;
         }
+      }
+
+      this.backgroundMask.fill(0);
+      if (this.transparentBackground) {
+        const bg = this.decoder.memoryColor & 0x0f;
+        let top = 0;
+        const push = (idx) => {
+          if (this.backgroundMask[idx] || this.visibleIndex[idx] !== bg) return;
+          this.backgroundMask[idx] = 1;
+          this.backgroundStack[top++] = idx;
+        };
+        for (let x = 0; x < VISIBLE_W; x += 1) {
+          push(x);
+          push((VISIBLE_H - 1) * VISIBLE_W + x);
+        }
+        for (let y = 1; y < VISIBLE_H - 1; y += 1) {
+          push(y * VISIBLE_W);
+          push(y * VISIBLE_W + VISIBLE_W - 1);
+        }
+        while (top > 0) {
+          const idx = this.backgroundStack[--top];
+          const x = idx % VISIBLE_W;
+          const y = (idx / VISIBLE_W) | 0;
+          if (x > 0) push(idx - 1);
+          if (x + 1 < VISIBLE_W) push(idx + 1);
+          if (y > 0) push(idx - VISIBLE_W);
+          if (y + 1 < VISIBLE_H) push(idx + VISIBLE_W);
+        }
+      }
+
+      for (let i = 0; i < this.visibleIndex.length; i += 1) {
+        const index = this.visibleIndex[i];
+        const rgba = this.decoder.palette[index] || [0, 0, 0, 255];
+        out[o] = rgba[0];
+        out[o + 1] = rgba[1];
+        out[o + 2] = rgba[2];
+        out[o + 3] = this.transparentBackground && this.backgroundMask[i] ? 0 : 255;
+        o += 4;
       }
 
       this.ctx.putImageData(this.imageData, 0, 0);
