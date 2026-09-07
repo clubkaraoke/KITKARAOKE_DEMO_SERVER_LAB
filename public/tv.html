@@ -34,7 +34,9 @@
       </div>
 
       <div class="screen tv-screen" id="screen">
-        <canvas id="cdgCanvas" class="tv-cdg hidden"></canvas>
+        <canvas id="cdgCanvas" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG ORIGINAL"></canvas>
+        <canvas id="cdgCanvasHD" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG SDF LAB V2"></canvas>
+        <canvas id="sdfProCanvas" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG SDF KARAOKE PRO"></canvas>
         <video id="video" class="tv-video hidden" playsinline preload="auto"></video>
         <audio id="audio" preload="auto"></audio>
 
@@ -47,7 +49,7 @@
 
         <div id="overlay" class="tv-overlay hidden">
           <strong id="overlayState">READY</strong>
-          <span id="overlayTitle"></span>
+          <span><b id="overlayQuality">ORIGINAL</b> · <span id="overlayTitle"></span></span>
         </div>
       </div>
     </section>
@@ -64,6 +66,8 @@
   </main>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="/sdf-renderer.js"></script>
+  <script src="/sdf-karaoke-pro-renderer.js"></script>
   <script src="/cdg-engine-lite.js"></script>
   <script>
     const socket = io();
@@ -72,7 +76,101 @@
     const audio = el("audio");
     const video = el("video");
     const cdgCanvas = el("cdgCanvas");
-    const cdgEngine = window.KITKARAOKE_CDG_ENGINE.create(cdgCanvas);
+    const cdgCanvasHD = el("cdgCanvasHD");
+    const sdfProCanvas = el("sdfProCanvas");
+
+    const QUALITY_LABELS = {
+      "original": "ORIGINAL",
+      "sdf-lab-v2": "SDF LAB V2",
+      "sdf-karaoke-pro": "SDF KARAOKE PRO"
+    };
+
+    const SDF_LAB_PARAMS = Object.freeze({
+      halo: 0.41,
+      cutoff: 0.54,
+      gamma: 0.85,
+      radius: 7,
+      threshold: 0.01,
+      preSmooth: 0,
+      expansion: 0.60,
+      scale: 8
+    });
+
+    const SDF_PRO_PARAMS = Object.freeze({
+      halo: 0.47,
+      cutoff: 0.54,
+      gamma: 0.85,
+      radius: 7,
+      threshold: 0.01,
+      preSmooth: 0,
+      expansion: 0.60,
+      scale: 8,
+      programGradient: 35,
+      proOutline: 0.60,
+      shadowX: 1.25,
+      shadowY: 1.00,
+      shadowBlur: 0.85,
+      shadowAlpha: 0.75
+    });
+
+    let activeCdgQuality = "original";
+    let requestedCdgQuality = "original";
+    let sdfLabRenderer = null;
+    let sdfProRenderer = null;
+    let qualityRendererError = null;
+    let lastQualityRenderAt = 0;
+
+    function normalizeQuality(value) {
+      const mode = String(value || "").trim().toLowerCase();
+      return QUALITY_LABELS[mode] ? mode : "original";
+    }
+
+    function ensureQualityRenderer(mode) {
+      try {
+        if (mode === "sdf-lab-v2" && !sdfLabRenderer) {
+          if (!window.SDFHDRenderer) throw new Error("SDFHDRenderer no cargado");
+          sdfLabRenderer = new window.SDFHDRenderer(
+            cdgCanvasHD,
+            288,
+            192,
+            { ...SDF_LAB_PARAMS }
+          );
+        }
+
+        if (mode === "sdf-karaoke-pro" && !sdfProRenderer) {
+          if (!window.SDFKaraokeProRenderer) throw new Error("SDFKaraokeProRenderer no cargado");
+          sdfProRenderer = new window.SDFKaraokeProRenderer(
+            sdfProCanvas,
+            288,
+            192,
+            { ...SDF_PRO_PARAMS }
+          );
+        }
+        return true;
+      } catch (error) {
+        qualityRendererError = String(error && error.message ? error.message : error);
+        return false;
+      }
+    }
+
+    function renderQualityFrame(rgba, meta = {}) {
+      if (activeCdgQuality === "original") return;
+      const now = performance.now();
+      if (!meta.force && now - lastQualityRenderAt < 40) return;
+      lastQualityRenderAt = now;
+
+      try {
+        if (activeCdgQuality === "sdf-lab-v2" && sdfLabRenderer) {
+          sdfLabRenderer.render(rgba);
+        } else if (activeCdgQuality === "sdf-karaoke-pro" && sdfProRenderer) {
+          sdfProRenderer.render(rgba);
+        }
+      } catch (error) {
+        qualityRendererError = String(error && error.message ? error.message : error);
+      }
+    }
+
+    const cdgEngine = window.KITKARAOKE_CDG_ENGINE.create(cdgCanvas, renderQualityFrame);
 
     let roomCode = null;
     let currentMedia = null;
@@ -115,10 +213,39 @@
     function setVisible(kind) {
       const isCdg = kind === "cdg";
       const isVideo = kind === "video";
-      cdgCanvas.classList.toggle("hidden", !isCdg);
+
+      cdgCanvas.classList.toggle("hidden", !isCdg || activeCdgQuality !== "original");
+      cdgCanvasHD.classList.toggle("hidden", !isCdg || activeCdgQuality !== "sdf-lab-v2");
+      sdfProCanvas.classList.toggle("hidden", !isCdg || activeCdgQuality !== "sdf-karaoke-pro");
       video.classList.toggle("hidden", !isVideo);
       el("emptyScreen").classList.toggle("hidden", isCdg || isVideo);
       el("overlay").classList.toggle("hidden", !(isCdg || isVideo));
+      el("overlayQuality").textContent = QUALITY_LABELS[activeCdgQuality] || "ORIGINAL";
+    }
+
+    function activateCdgQuality(requested) {
+      requestedCdgQuality = normalizeQuality(requested);
+      let selected = requestedCdgQuality;
+      let fallback = null;
+
+      if (selected !== "original" && !ensureQualityRenderer(selected)) {
+        fallback = qualityRendererError || "Renderer WebGL no disponible";
+        selected = "original";
+      }
+
+      activeCdgQuality = selected;
+      lastQualityRenderAt = 0;
+      setVisible(cdgMode ? "cdg" : null);
+
+      report(fallback ? "TV_RENDERER_FALLBACK" : "TV_RENDERER_SELECTED", {
+        state: mediaReady ? "ready" : "preloading",
+        requestedQuality: requestedCdgQuality,
+        activeQuality: activeCdgQuality,
+        qualityLabel: QUALITY_LABELS[activeCdgQuality],
+        fallbackReason: fallback
+      }, fallback ? "error" : "info");
+
+      return activeCdgQuality;
     }
 
     function clearObjectUrls() {
@@ -144,6 +271,7 @@
           currentTime: Number(audio.currentTime.toFixed(3)),
           cdgTime: Number(sync.cdgTime.toFixed(3)),
           skewMs: sync.skewMs,
+          cdgQuality: activeCdgQuality,
           bufferedSeconds: Number.isFinite(audio.duration) ? Number(audio.duration.toFixed(2)) : null
         });
       }
@@ -266,6 +394,11 @@
       mediaReady = false;
       cdgMode = String(media.format).toUpperCase() === "CDG";
       rebufferCount = 0;
+      if (cdgMode) {
+        activateCdgQuality(media.cdgQuality || "original");
+      } else {
+        activeCdgQuality = "original";
+      }
 
       el("traceShort").textContent = currentTraceId ? currentTraceId.slice(0, 8) : "—";
       el("rebuffer").textContent = "0";
@@ -278,6 +411,8 @@
       report("TV_PRELOAD_START", {
         state: "preloading",
         format: media.format,
+        cdgQuality: cdgMode ? activeCdgQuality : null,
+        requestedCdgQuality: cdgMode ? requestedCdgQuality : null,
         duration: media.duration,
         preloadPolicy: media.preloadPolicy
       });
@@ -294,7 +429,8 @@
           elapsedMs: result.elapsedMs,
           bytes: result.bytes,
           bufferedSeconds: Number((result.duration || media.duration || 0).toFixed(2)),
-          cdgPackets: cdgMode ? cdgEngine.packets : null
+          cdgPackets: cdgMode ? cdgEngine.packets : null,
+          cdgQuality: cdgMode ? activeCdgQuality : null
         });
       } catch (error) {
         if (error.name === "AbortError") return;
@@ -323,7 +459,8 @@
         setState("PLAY", "Reproduciendo desde memoria local");
         report("TV_PLAY", {
           state: "play",
-          currentTime: cdgMode ? audio.currentTime : video.currentTime
+          currentTime: cdgMode ? audio.currentTime : video.currentTime,
+          cdgQuality: cdgMode ? activeCdgQuality : null
         });
       } catch (error) {
         report("TV_AUTOPLAY_BLOCKED", {
