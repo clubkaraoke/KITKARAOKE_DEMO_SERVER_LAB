@@ -46,6 +46,11 @@ function nowIso() {
 
 function safeObject(value, depth = 0) {
   if (depth > 5) return "[depth-limit]";
+  if (typeof value === "string") {
+    return value
+      .replace(/([?&]token=)[^&\\s"]+/gi, "$1[redacted]")
+      .replace(/(bearer\\s+)[a-z0-9._~+\\/-]+/gi, "$1[redacted]");
+  }
   if (Array.isArray(value)) return value.slice(0, 80).map((v) => safeObject(v, depth + 1));
   if (!value || typeof value !== "object") return value;
   const out = {};
@@ -130,6 +135,7 @@ function newRoom(code, djSocketId) {
     tvSocketIds: new Set(),
     readyTvSocketIds: new Set(),
     agentCode: null,
+    activeTraceId: null,
     playback: {
       state: "idle",
       media: null,
@@ -166,6 +172,7 @@ function publicRoomState(room) {
     tvReadyCount: room.readyTvSocketIds.size,
     hasDj: Boolean(room.djSocketId),
     agent: publicAgentState(room.agentCode),
+    activeTraceId: room.activeTraceId || null,
     playback: room.playback
   };
 }
@@ -671,7 +678,20 @@ io.on("connection", (socket) => {
     const media = payload.media && typeof payload.media === "object" ? payload.media : {};
     if (!media.id || !media.format) return ack({ ok: false, error: "INVALID_MEDIA" });
 
+    const previousTraceId = room.activeTraceId;
+    if (previousTraceId && previousTraceId !== room.playback.traceId) {
+      const previousJob = mediaJobs.get(previousTraceId);
+      if (previousJob && !["ready", "error", "expired", "superseded"].includes(previousJob.status)) {
+        previousJob.status = "superseded";
+        previousJob.updatedAt = Date.now();
+        diag(room.code, "OVH", "MEDIA_PREPARE_SUPERSEDED", {
+          replacedBy: "newer-request"
+        }, previousTraceId);
+      }
+    }
+
     const job = createMediaJob(room, media, payload.duration);
+    room.activeTraceId = job.traceId;
     room.readyTvSocketIds.clear();
     room.playback = {
       state: "preparing",
@@ -695,6 +715,14 @@ io.on("connection", (socket) => {
     const origin = String(payload.origin || "").startsWith("https://")
       ? String(payload.origin).replace(/\/$/, "")
       : "https://demodj.kitkaraoke.com";
+
+    if (previousTraceId && previousTraceId !== job.traceId) {
+      io.to(agent.socketId).emit("agent:prepare:cancel", {
+        traceId: previousTraceId,
+        roomCode: room.code,
+        replacedByTraceId: job.traceId
+      });
+    }
 
     io.to(agent.socketId).emit("agent:prepare", {
       traceId: job.traceId,
@@ -739,6 +767,16 @@ io.on("connection", (socket) => {
     const job = mediaJobs.get(traceId);
     if (!job || socket.data.role !== "agent" || socket.data.agentCode !== job.agentCode) {
       return ack({ ok: false, error: "PREPARE_JOB_INVALID" });
+    }
+
+    const room = rooms.get(job.roomCode);
+    if (!room || room.activeTraceId !== traceId || job.status === "superseded") {
+      job.status = "superseded";
+      job.updatedAt = Date.now();
+      diag(job.roomCode, "OVH", "MEDIA_PREPARE_IGNORED_STALE", {
+        activeTraceId: room ? room.activeTraceId : null
+      }, traceId);
+      return ack({ ok: true, superseded: true });
     }
 
     if (!allPartsReady(job)) {
@@ -885,7 +923,7 @@ io.on("connection", (socket) => {
     if (traceId) events = events.filter((entry) => entry.traceId === traceId);
     ack({
       ok: true,
-      room: publicRoomState(room),
+      room: safeObject(publicRoomState(room)),
       traceId: traceId || null,
       generatedAt: nowIso(),
       events
