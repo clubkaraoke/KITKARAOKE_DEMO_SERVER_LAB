@@ -14,6 +14,7 @@ const PORT = Number(process.env.PORT || 3000);
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_MINUTES || 120) * 60 * 1000;
 const MEDIA_TTL_MS = Number(process.env.MEDIA_TTL_MINUTES || 20) * 60 * 1000;
 const MEDIA_DIR = process.env.MEDIA_DIR || path.join(__dirname, "..", ".media-cache");
+const DIAG_DIR = process.env.DIAG_DIR || path.join(__dirname, "..", ".diagnostics");
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 80) * 1024 * 1024;
 const SEARCH_TTL_MS = 30 * 1000;
 const DIAG_LIMIT = 1500;
@@ -37,6 +38,7 @@ const mediaJobs = new Map();
 const roomDiagnostics = new Map();
 
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
+fs.mkdirSync(DIAG_DIR, { recursive: true });
 
 function nowIso() {
   return new Date().toISOString();
@@ -82,6 +84,15 @@ function diag(roomCode, source, event, data = {}, traceId = null, level = "info"
   list.push(entry);
   if (list.length > DIAG_LIMIT) list.splice(0, list.length - DIAG_LIMIT);
   roomDiagnostics.set(roomCode, list);
+
+  const dayDir = path.join(DIAG_DIR, entry.ts.slice(0, 10));
+  const diskEntry = JSON.stringify(entry) + "\n";
+  fsp.mkdir(dayDir, { recursive: true })
+    .then(() => fsp.appendFile(path.join(dayDir, roomCode + ".jsonl"), diskEntry, "utf8"))
+    .catch((error) => log("diag_persist_error", {
+      roomCode,
+      error: String(error && error.message ? error.message : error)
+    }));
 
   const room = rooms.get(roomCode);
   if (room && room.djSocketId) io.to(room.djSocketId).emit("diagnostic:event", entry);
@@ -964,6 +975,7 @@ server.listen(PORT, "0.0.0.0", () => {
     port: PORT,
     phase: 3,
     mediaDir: MEDIA_DIR,
+    diagnosticsDir: DIAG_DIR,
     preloadPolicy: "FULL_BEFORE_PLAY"
   });
 });
