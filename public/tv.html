@@ -34,6 +34,7 @@
       </div>
 
       <div class="screen tv-screen" id="screen">
+        <canvas id="bgCanvas" class="tv-bg hidden" aria-label="Fondo animado CDG"></canvas>
         <canvas id="cdgCanvas" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG ORIGINAL"></canvas>
         <canvas id="cdgCanvasHD" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG SDF LAB V2"></canvas>
         <canvas id="sdfProCanvas" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG SDF KARAOKE PRO"></canvas>
@@ -66,10 +67,13 @@
         </div>
       </div>
       <div id="copyTvStatus" class="inline-note copy-status">Listo para copiar.</div>
-      <div class="status-grid">
+      <div class="status-grid tv-perf-grid">
         <div class="stat"><strong id="traceShort">—</strong><span>traceId</span></div>
         <div class="stat"><strong id="downloadMs">—</strong><span>Precarga</span></div>
         <div class="stat"><strong id="rebuffer">0</strong><span>Rebuffer</span></div>
+        <div class="stat"><strong id="rendererFps">—</strong><span>Renderer FPS</span></div>
+        <div class="stat"><strong id="backgroundFps">—</strong><span>Fondo FPS</span></div>
+        <div class="stat"><strong id="transportRtt">—</strong><span>Socket RTT</span></div>
       </div>
       <div id="tvLog" class="log compact-log">Esperando media…</div>
     </section>
@@ -80,11 +84,21 @@
   <script src="/sdf-karaoke-pro-renderer.js"></script>
   <script src="/cdg-engine-lite.js"></script>
   <script>
-    const socket = io();
+    const TV_CLIENT_VERSION = "LAB-TV-4.0";
+    const TRANSPORT_MODE = "HTTP_PRELOAD";
+    const socket = io({
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 500,
+      reconnectionDelayMax: 5000,
+      timeout: 10000
+    });
     const el = (id) => document.getElementById(id);
 
     const audio = el("audio");
     const video = el("video");
+    const bgCanvas = el("bgCanvas");
+    const bgCtx = bgCanvas.getContext("2d", { alpha: false });
     const cdgCanvas = el("cdgCanvas");
     const cdgCanvasHD = el("cdgCanvasHD");
     const sdfProCanvas = el("sdfProCanvas");
@@ -94,33 +108,29 @@
       "sdf-lab-v2": "SDF LAB V2",
       "sdf-karaoke-pro": "SDF KARAOKE PRO"
     };
+    const BG_LABELS = {
+      "black": "NEGRO",
+      "waves": "ONDAS",
+      "glow": "GLOW",
+      "gradient": "GRADIENTE",
+      "particles": "PARTÍCULAS"
+    };
+    const BG_QUALITY = {
+      light: { fps: 20, scale: 0.50, particles: 24 },
+      normal: { fps: 30, scale: 0.72, particles: 48 },
+      premium: { fps: 60, scale: 1.00, particles: 84 }
+    };
+    const VIDEO_HEIGHTS = { auto: 0, "360": 360, "540": 540, "720": 720 };
 
     const SDF_LAB_PARAMS = Object.freeze({
-      halo: 0.41,
-      cutoff: 0.54,
-      gamma: 0.85,
-      radius: 7,
-      threshold: 0.01,
-      preSmooth: 0,
-      expansion: 0.60,
-      scale: 8
+      halo: 0.41, cutoff: 0.54, gamma: 0.85, radius: 7, threshold: 0.01,
+      preSmooth: 0, expansion: 0.60, scale: 8, transparentBackground: true
     });
-
     const SDF_PRO_PARAMS = Object.freeze({
-      halo: 0.47,
-      cutoff: 0.54,
-      gamma: 0.85,
-      radius: 7,
-      threshold: 0.01,
-      preSmooth: 0,
-      expansion: 0.60,
-      scale: 8,
-      programGradient: 35,
-      proOutline: 0.60,
-      shadowX: 1.25,
-      shadowY: 1.00,
-      shadowBlur: 0.85,
-      shadowAlpha: 0.75
+      halo: 0.47, cutoff: 0.54, gamma: 0.85, radius: 7, threshold: 0.01,
+      preSmooth: 0, expansion: 0.60, scale: 8, programGradient: 35,
+      proOutline: 0.60, shadowX: 1.25, shadowY: 1.00,
+      shadowBlur: 0.85, shadowAlpha: 0.75, transparentBackground: true
     });
 
     let activeCdgQuality = "original";
@@ -130,31 +140,153 @@
     let qualityRendererError = null;
     let lastQualityRenderAt = 0;
 
+    let backgroundMode = "black";
+    let requestedBackgroundQuality = "normal";
+    let activeBackgroundQuality = "normal";
+    let bgAnimationId = 0;
+    let bgLastDrawAt = 0;
+    let bgParticles = [];
+    let bgPerfWindowAt = performance.now();
+    let bgPerfFrames = 0;
+    let bgPoorWindows = 0;
+
+    let roomCode = null;
+    let currentMedia = null;
+    let currentTraceId = null;
+    let mediaReady = false;
+    let cdgMode = false;
+    let loadController = null;
+    let loadSeq = 0;
+    let readySeq = 0;
+    let lastLoadSentAt = 0;
+    let audioBlobUrl = null;
+    let videoBlobUrl = null;
+    let animationId = 0;
+    let lastSyncLogAt = 0;
+    let rebufferCount = 0;
+    let videoQualityReachedMs = null;
+    let videoLoadStartedAt = 0;
+    let videoFrameGeneration = 0;
+
+    const rendererMetrics = {
+      renderer: "original",
+      frames: 0,
+      throttledFrames: 0,
+      longFrames: 0,
+      avgFrameMs: 0,
+      maxFrameMs: 0,
+      fps: 0,
+      windowFrames: 0,
+      windowAt: performance.now(),
+      gpu: null,
+      webgl: false
+    };
+    const frameMetrics = {
+      callbackSupported: typeof video.requestVideoFrameCallback === "function",
+      presentedFrames: 0,
+      decodedFrames: 0,
+      droppedFrames: 0,
+      fps: 0,
+      freezes: 0,
+      longFrameGaps: 0,
+      lastFrameGapMs: 0,
+      maxFrameGapMs: 0,
+      windowFrames: 0,
+      windowAt: performance.now()
+    };
+    const backgroundMetrics = {
+      mode: "black",
+      requestedQuality: "normal",
+      activeQuality: "normal",
+      fps: 0,
+      frames: 0,
+      avgDrawMs: 0,
+      maxDrawMs: 0,
+      fallbackCount: 0
+    };
+    const transportMetrics = {
+      mode: TRANSPORT_MODE,
+      socketConnected: false,
+      socketTransport: null,
+      socketRttMs: null,
+      reconnectCount: 0,
+      preloadRetries: 0,
+      rangeSupported: null,
+      lastHttpMbps: null,
+      ice: "not-applicable",
+      turn: "not-applicable"
+    };
+
     function normalizeQuality(value) {
       const mode = String(value || "").trim().toLowerCase();
       return QUALITY_LABELS[mode] ? mode : "original";
+    }
+    function normalizeBg(value) {
+      const mode = String(value || "").trim().toLowerCase();
+      return BG_LABELS[mode] ? mode : "black";
+    }
+    function normalizeBgQuality(value) {
+      const mode = String(value || "").trim().toLowerCase();
+      return BG_QUALITY[mode] ? mode : "normal";
+    }
+    function normalizeVideoQuality(value) {
+      const mode = String(value || "").trim().toLowerCase();
+      return Object.prototype.hasOwnProperty.call(VIDEO_HEIGHTS, mode) ? mode : "auto";
+    }
+
+    function safeGpuInfo(renderer) {
+      try {
+        const gl = renderer && renderer.gl;
+        if (!gl) return null;
+        const ext = gl.getExtension("WEBGL_debug_renderer_info");
+        const vendor = ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : gl.getParameter(gl.VENDOR);
+        const name = ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : gl.getParameter(gl.RENDERER);
+        return { vendor: String(vendor || ""), renderer: String(name || "") };
+      } catch (_) {
+        return null;
+      }
+    }
+
+    function updateRendererMetric(frameMs, rendererName) {
+      const now = performance.now();
+      rendererMetrics.renderer = rendererName;
+      rendererMetrics.frames += 1;
+      rendererMetrics.windowFrames += 1;
+      rendererMetrics.maxFrameMs = Math.max(rendererMetrics.maxFrameMs, frameMs);
+      rendererMetrics.avgFrameMs = rendererMetrics.frames === 1
+        ? frameMs
+        : rendererMetrics.avgFrameMs * 0.92 + frameMs * 0.08;
+      if (frameMs > 25) rendererMetrics.longFrames += 1;
+      const elapsed = now - rendererMetrics.windowAt;
+      if (elapsed >= 1000) {
+        rendererMetrics.fps = Number((rendererMetrics.windowFrames * 1000 / elapsed).toFixed(1));
+        rendererMetrics.windowFrames = 0;
+        rendererMetrics.windowAt = now;
+        el("rendererFps").textContent = rendererMetrics.fps.toFixed(1);
+      }
     }
 
     function ensureQualityRenderer(mode) {
       try {
         if (mode === "sdf-lab-v2" && !sdfLabRenderer) {
           if (!window.SDFHDRenderer) throw new Error("SDFHDRenderer no cargado");
-          sdfLabRenderer = new window.SDFHDRenderer(
-            cdgCanvasHD,
-            288,
-            192,
-            { ...SDF_LAB_PARAMS }
-          );
+          sdfLabRenderer = new window.SDFHDRenderer(cdgCanvasHD, 288, 192, { ...SDF_LAB_PARAMS });
+          rendererMetrics.webgl = true;
+          rendererMetrics.gpu = safeGpuInfo(sdfLabRenderer);
+          cdgCanvasHD.addEventListener("webglcontextlost", (event) => {
+            event.preventDefault();
+            fallbackRenderer("WEBGL_CONTEXT_LOST_SDF_LAB");
+          });
         }
-
         if (mode === "sdf-karaoke-pro" && !sdfProRenderer) {
           if (!window.SDFKaraokeProRenderer) throw new Error("SDFKaraokeProRenderer no cargado");
-          sdfProRenderer = new window.SDFKaraokeProRenderer(
-            sdfProCanvas,
-            288,
-            192,
-            { ...SDF_PRO_PARAMS }
-          );
+          sdfProRenderer = new window.SDFKaraokeProRenderer(sdfProCanvas, 288, 192, { ...SDF_PRO_PARAMS });
+          rendererMetrics.webgl = true;
+          rendererMetrics.gpu = safeGpuInfo(sdfProRenderer);
+          sdfProCanvas.addEventListener("webglcontextlost", (event) => {
+            event.preventDefault();
+            fallbackRenderer("WEBGL_CONTEXT_LOST_SDF_PRO");
+          });
         }
         return true;
       } catch (error) {
@@ -163,161 +295,291 @@
       }
     }
 
-    function renderQualityFrame(rgba, meta = {}) {
+    function fallbackRenderer(reason) {
       if (activeCdgQuality === "original") return;
+      const requested = activeCdgQuality;
+      activeCdgQuality = "original";
+      qualityRendererError = reason;
+      setVisible(cdgMode ? "cdg" : null);
+      report("TV_RENDERER_FALLBACK", {
+        state: mediaReady ? "ready" : "preloading",
+        requestedQuality: requested,
+        activeQuality: "original",
+        fallbackReason: reason
+      }, "error");
+    }
+
+    function renderQualityFrame(rgba, meta = {}) {
+      if (activeCdgQuality === "original") {
+        updateRendererMetric(Number(meta.renderMs || 0), "ORIGINAL");
+        return;
+      }
       const now = performance.now();
-      if (!meta.force && now - lastQualityRenderAt < 40) return;
+      if (!meta.force && now - lastQualityRenderAt < 40) {
+        rendererMetrics.throttledFrames += 1;
+        return;
+      }
       lastQualityRenderAt = now;
 
       try {
+        const started = performance.now();
         if (activeCdgQuality === "sdf-lab-v2" && sdfLabRenderer) {
           sdfLabRenderer.render(rgba);
+          updateRendererMetric(performance.now() - started, "SDF LAB V2");
         } else if (activeCdgQuality === "sdf-karaoke-pro" && sdfProRenderer) {
           sdfProRenderer.render(rgba);
+          updateRendererMetric(performance.now() - started, "SDF KARAOKE PRO");
         }
       } catch (error) {
         qualityRendererError = String(error && error.message ? error.message : error);
+        fallbackRenderer("RUNTIME_RENDER_ERROR: " + qualityRendererError);
       }
     }
 
     const cdgEngine = window.KITKARAOKE_CDG_ENGINE.create(cdgCanvas, renderQualityFrame);
+    cdgEngine.setTransparentBackground(true);
 
-    let roomCode = null;
-    let currentMedia = null;
-    let currentTraceId = null;
-    let mediaReady = false;
-    let cdgMode = false;
-    let loadController = null;
-    let audioBlobUrl = null;
-    let videoBlobUrl = null;
-    let animationId = 0;
-    let lastSyncLogAt = 0;
-    let rebufferCount = 0;
-
-    function buildTvDiagnosticText() {
-      const quality = QUALITY_LABELS[activeCdgQuality] || activeCdgQuality || "—";
-      const header = [
-        "KITKARAOKE · DIAGNÓSTICO TV",
-        "Sala: " + (roomCode || "SIN SALA"),
-        "traceId: " + (currentTraceId || "—"),
-        "Estado: " + el("state").textContent,
-        "Media: " + (currentMedia?.title || "—"),
-        "Formato: " + (currentMedia?.format || "—"),
-        "Calidad CDG: " + quality,
-        "Precarga: " + el("downloadMs").textContent,
-        "Rebuffer: " + rebufferCount,
-        "Generado: " + new Date().toISOString(),
-        "",
-        "LOG COMPLETO TV",
-        "================",
-        ""
-      ].join("\n");
-
-      return header + el("tvLog").textContent;
+    function resizeBackground() {
+      const profile = BG_QUALITY[activeBackgroundQuality] || BG_QUALITY.normal;
+      const rect = el("screen").getBoundingClientRect();
+      const dpr = Math.min(window.devicePixelRatio || 1, activeBackgroundQuality === "premium" ? 1.5 : 1);
+      const width = Math.max(320, Math.min(1920, Math.round(rect.width * profile.scale * dpr)));
+      const height = Math.max(180, Math.min(1080, Math.round(rect.height * profile.scale * dpr)));
+      if (bgCanvas.width !== width || bgCanvas.height !== height) {
+        bgCanvas.width = width;
+        bgCanvas.height = height;
+        bgParticles = [];
+      }
     }
 
-    async function copyTextWithFallback(text) {
-      if (navigator.clipboard && window.isSecureContext) {
-        try {
-          await navigator.clipboard.writeText(text);
-          return true;
-        } catch (_) {}
+    function initParticles() {
+      const profile = BG_QUALITY[activeBackgroundQuality] || BG_QUALITY.normal;
+      while (bgParticles.length < profile.particles) {
+        bgParticles.push({
+          x: Math.random(), y: Math.random(), r: 0.7 + Math.random() * 2.4,
+          speed: 0.000015 + Math.random() * 0.000035,
+          drift: (Math.random() - 0.5) * 0.00002,
+          phase: Math.random() * Math.PI * 2
+        });
+      }
+      if (bgParticles.length > profile.particles) bgParticles.length = profile.particles;
+    }
+
+    function fillDarkBase(ctx, w, h, hue) {
+      const g = ctx.createLinearGradient(0, 0, w, h);
+      g.addColorStop(0, "hsl(" + hue + ", 55%, 7%)");
+      g.addColorStop(0.5, "hsl(" + ((hue + 25) % 360) + ", 50%, 10%)");
+      g.addColorStop(1, "hsl(" + ((hue + 65) % 360) + ", 55%, 6%)");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+    }
+
+    function drawBackground(now) {
+      const w = bgCanvas.width, h = bgCanvas.height;
+      if (!w || !h) return;
+      const hue = (220 + now * 0.006) % 360;
+      const started = performance.now();
+
+      if (backgroundMode === "black") {
+        bgCtx.fillStyle = "#000";
+        bgCtx.fillRect(0, 0, w, h);
+      } else if (backgroundMode === "waves") {
+        fillDarkBase(bgCtx, w, h, hue);
+        bgCtx.save();
+        bgCtx.globalCompositeOperation = "screen";
+        for (let band = 0; band < 4; band += 1) {
+          bgCtx.beginPath();
+          const baseY = h * (0.25 + band * 0.18);
+          for (let x = -20; x <= w + 20; x += Math.max(8, w / 120)) {
+            const y = baseY +
+              Math.sin(x * 0.012 + now * 0.00065 + band * 1.7) * h * (0.035 + band * 0.006) +
+              Math.sin(x * 0.004 - now * 0.00035 + band) * h * 0.025;
+            if (x <= -20) bgCtx.moveTo(x, y); else bgCtx.lineTo(x, y);
+          }
+          bgCtx.strokeStyle = "hsla(" + ((hue + band * 28) % 360) + ", 92%, 64%, " + (0.18 + band * 0.035) + ")";
+          bgCtx.lineWidth = Math.max(10, h * (0.018 + band * 0.003));
+          bgCtx.shadowBlur = Math.max(18, h * 0.035);
+          bgCtx.shadowColor = "hsla(" + ((hue + band * 28) % 360) + ", 95%, 65%, .42)";
+          bgCtx.stroke();
+        }
+        bgCtx.restore();
+      } else if (backgroundMode === "glow") {
+        fillDarkBase(bgCtx, w, h, hue);
+        bgCtx.save();
+        bgCtx.globalCompositeOperation = "screen";
+        for (let i = 0; i < 5; i += 1) {
+          const cx = w * (0.15 + 0.18 * i + Math.sin(now * 0.00023 + i) * 0.07);
+          const cy = h * (0.25 + (i % 3) * 0.24 + Math.cos(now * 0.00031 + i * 2) * 0.10);
+          const radius = Math.max(w, h) * (0.16 + (i % 2) * 0.06);
+          const rg = bgCtx.createRadialGradient(cx, cy, 0, cx, cy, radius);
+          rg.addColorStop(0, "hsla(" + ((hue + i * 35) % 360) + ", 95%, 62%, .28)");
+          rg.addColorStop(0.45, "hsla(" + ((hue + i * 35) % 360) + ", 90%, 50%, .10)");
+          rg.addColorStop(1, "hsla(" + ((hue + i * 35) % 360) + ", 90%, 40%, 0)");
+          bgCtx.fillStyle = rg;
+          bgCtx.fillRect(0, 0, w, h);
+        }
+        bgCtx.restore();
+      } else if (backgroundMode === "gradient") {
+        const a = (hue + Math.sin(now * 0.0003) * 25 + 360) % 360;
+        const g = bgCtx.createLinearGradient(
+          w * (0.5 + Math.sin(now * 0.00017) * 0.5), 0,
+          w * (0.5 + Math.cos(now * 0.00019) * 0.5), h
+        );
+        g.addColorStop(0, "hsl(" + a + ", 78%, 12%)");
+        g.addColorStop(0.45, "hsl(" + ((a + 45) % 360) + ", 78%, 19%)");
+        g.addColorStop(1, "hsl(" + ((a + 90) % 360) + ", 72%, 9%)");
+        bgCtx.fillStyle = g;
+        bgCtx.fillRect(0, 0, w, h);
+      } else if (backgroundMode === "particles") {
+        fillDarkBase(bgCtx, w, h, hue);
+        initParticles();
+        bgCtx.save();
+        bgCtx.globalCompositeOperation = "screen";
+        for (const p of bgParticles) {
+          p.y -= p.speed * Math.max(1, now - (p.lastAt || now));
+          p.x += p.drift * Math.max(1, now - (p.lastAt || now));
+          p.lastAt = now;
+          if (p.y < -0.05) { p.y = 1.05; p.x = Math.random(); }
+          if (p.x < -0.05) p.x = 1.05;
+          if (p.x > 1.05) p.x = -0.05;
+          const pulse = 0.55 + Math.sin(now * 0.002 + p.phase) * 0.25;
+          bgCtx.beginPath();
+          bgCtx.arc(p.x * w, p.y * h, p.r * (w / 900), 0, Math.PI * 2);
+          bgCtx.fillStyle = "hsla(" + ((hue + p.phase * 18) % 360) + ", 90%, 72%, " + Math.max(0.12, pulse) + ")";
+          bgCtx.shadowBlur = 10;
+          bgCtx.shadowColor = "hsla(" + ((hue + p.phase * 18) % 360) + ", 90%, 65%, .55)";
+          bgCtx.fill();
+        }
+        bgCtx.restore();
       }
 
-      const area = document.createElement("textarea");
-      area.value = text;
-      area.setAttribute("readonly", "");
-      area.style.position = "fixed";
-      area.style.left = "-9999px";
-      area.style.top = "0";
-      document.body.appendChild(area);
-      area.focus();
-      area.select();
-      area.setSelectionRange(0, area.value.length);
-
-      let ok = false;
-      try {
-        ok = document.execCommand("copy");
-      } catch (_) {
-        ok = false;
+      const drawMs = performance.now() - started;
+      backgroundMetrics.frames += 1;
+      backgroundMetrics.avgDrawMs = backgroundMetrics.frames === 1
+        ? drawMs : backgroundMetrics.avgDrawMs * 0.94 + drawMs * 0.06;
+      backgroundMetrics.maxDrawMs = Math.max(backgroundMetrics.maxDrawMs, drawMs);
+      bgPerfFrames += 1;
+      const elapsed = performance.now() - bgPerfWindowAt;
+      if (elapsed >= 2000) {
+        const fps = bgPerfFrames * 1000 / elapsed;
+        backgroundMetrics.fps = Number(fps.toFixed(1));
+        el("backgroundFps").textContent = backgroundMode === "black" ? "—" : backgroundMetrics.fps.toFixed(1);
+        const target = BG_QUALITY[activeBackgroundQuality].fps;
+        if (!document.hidden && backgroundMode !== "black" && fps < target * 0.68) {
+          bgPoorWindows += 1;
+        } else {
+          bgPoorWindows = 0;
+        }
+        if (bgPoorWindows >= 2) downgradeBackgroundQuality();
+        bgPerfFrames = 0;
+        bgPerfWindowAt = performance.now();
       }
-      area.remove();
-      return ok;
     }
 
-    function downloadTextFile(name, content) {
-      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = name;
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    function backgroundLoop(now) {
+      if (!cdgMode || backgroundMode === "black" || document.hidden) {
+        bgAnimationId = requestAnimationFrame(backgroundLoop);
+        return;
+      }
+      const target = BG_QUALITY[activeBackgroundQuality].fps;
+      const minGap = 1000 / target;
+      if (!bgLastDrawAt || now - bgLastDrawAt >= minGap) {
+        drawBackground(now);
+        bgLastDrawAt = now;
+      }
+      bgAnimationId = requestAnimationFrame(backgroundLoop);
     }
 
-    function localLog(message, data) {
-      const line = "[" + new Date().toLocaleTimeString() + "] " + message +
-        (data ? "\n" + JSON.stringify(data, null, 2) : "");
-      el("tvLog").textContent = line + "\n\n" + el("tvLog").textContent;
+    function startBackground() {
+      if (!bgAnimationId) bgAnimationId = requestAnimationFrame(backgroundLoop);
+      resizeBackground();
+      if (backgroundMode === "black") drawBackground(performance.now());
     }
 
-    function report(event, extra = {}, level = "info") {
-      if (!roomCode) return;
-      socket.emit("player:status", {
-        event,
-        state: extra.state || el("state").textContent.toLowerCase(),
-        traceId: currentTraceId,
-        mediaId: currentMedia?.id || null,
-        rebufferCount,
-        level,
-        ...extra
-      });
-      localLog(event, extra);
+    function downgradeBackgroundQuality() {
+      const order = ["light", "normal", "premium"];
+      const idx = order.indexOf(activeBackgroundQuality);
+      if (idx <= 0) return;
+      const previous = activeBackgroundQuality;
+      activeBackgroundQuality = order[idx - 1];
+      backgroundMetrics.activeQuality = activeBackgroundQuality;
+      backgroundMetrics.fallbackCount += 1;
+      bgPoorWindows = 0;
+      resizeBackground();
+      report("TV_BACKGROUND_FALLBACK", {
+        state: mediaReady ? "ready" : "preloading",
+        requestedQuality: requestedBackgroundQuality,
+        previousQuality: previous,
+        activeQuality: activeBackgroundQuality,
+        reason: "FPS_BELOW_TARGET"
+      }, "error");
     }
 
-    function setState(state, detail) {
-      el("state").textContent = state;
-      el("overlayState").textContent = state;
-      if (detail) el("preload").textContent = detail;
+    function applyBackground(mode, quality, source) {
+      backgroundMode = normalizeBg(mode);
+      requestedBackgroundQuality = normalizeBgQuality(quality);
+      activeBackgroundQuality = requestedBackgroundQuality;
+      backgroundMetrics.mode = backgroundMode;
+      backgroundMetrics.requestedQuality = requestedBackgroundQuality;
+      backgroundMetrics.activeQuality = activeBackgroundQuality;
+      bgPoorWindows = 0;
+      bgLastDrawAt = 0;
+      resizeBackground();
+      if (cdgMode) {
+        bgCanvas.classList.remove("hidden");
+        startBackground();
+        if (backgroundMode === "black") drawBackground(performance.now());
+      }
+      if (sdfLabRenderer && sdfLabRenderer.setParams) sdfLabRenderer.setParams({ transparentBackground: true });
+      if (sdfProRenderer && sdfProRenderer.setParams) sdfProRenderer.setParams({ transparentBackground: true });
+      cdgEngine.setTransparentBackground(true);
+      if (source) {
+        report("TV_BACKGROUND_SELECTED", {
+          state: mediaReady ? "ready" : "preloading",
+          backgroundMode,
+          backgroundQuality: requestedBackgroundQuality,
+          source
+        });
+      }
     }
 
     function setVisible(kind) {
       const isCdg = kind === "cdg";
       const isVideo = kind === "video";
-
+      bgCanvas.classList.toggle("hidden", !isCdg);
       cdgCanvas.classList.toggle("hidden", !isCdg || activeCdgQuality !== "original");
       cdgCanvasHD.classList.toggle("hidden", !isCdg || activeCdgQuality !== "sdf-lab-v2");
       sdfProCanvas.classList.toggle("hidden", !isCdg || activeCdgQuality !== "sdf-karaoke-pro");
       video.classList.toggle("hidden", !isVideo);
       el("emptyScreen").classList.toggle("hidden", isCdg || isVideo);
       el("overlay").classList.toggle("hidden", !(isCdg || isVideo));
-      el("overlayQuality").textContent = QUALITY_LABELS[activeCdgQuality] || "ORIGINAL";
+      el("overlayQuality").textContent = isCdg
+        ? (QUALITY_LABELS[activeCdgQuality] || "ORIGINAL") + " · " + (BG_LABELS[backgroundMode] || "NEGRO")
+        : "VIDEO " + String(currentMedia?.videoQuality || "auto").toUpperCase();
     }
 
-    function activateCdgQuality(requested) {
+    function activateCdgQuality(requested, source) {
       requestedCdgQuality = normalizeQuality(requested);
       let selected = requestedCdgQuality;
       let fallback = null;
-
       if (selected !== "original" && !ensureQualityRenderer(selected)) {
         fallback = qualityRendererError || "Renderer WebGL no disponible";
         selected = "original";
       }
-
       activeCdgQuality = selected;
       lastQualityRenderAt = 0;
+      if (sdfLabRenderer && sdfLabRenderer.setParams) sdfLabRenderer.setParams({ transparentBackground: true });
+      if (sdfProRenderer && sdfProRenderer.setParams) sdfProRenderer.setParams({ transparentBackground: true });
       setVisible(cdgMode ? "cdg" : null);
-
       report(fallback ? "TV_RENDERER_FALLBACK" : "TV_RENDERER_SELECTED", {
         state: mediaReady ? "ready" : "preloading",
         requestedQuality: requestedCdgQuality,
         activeQuality: activeCdgQuality,
         qualityLabel: QUALITY_LABELS[activeCdgQuality],
-        fallbackReason: fallback
+        fallbackReason: fallback,
+        source: source || "load",
+        gpu: rendererMetrics.gpu
       }, fallback ? "error" : "info");
-
       return activeCdgQuality;
     }
 
@@ -336,7 +598,6 @@
     function syncLoop(ts) {
       if (!cdgMode || !mediaReady) return;
       const sync = cdgEngine.sync(audio.currentTime);
-
       if (ts - lastSyncLogAt >= 2000) {
         lastSyncLogAt = ts;
         report("TV_SYNC_SAMPLE", {
@@ -345,6 +606,8 @@
           cdgTime: Number(sync.cdgTime.toFixed(3)),
           skewMs: sync.skewMs,
           cdgQuality: activeCdgQuality,
+          cdgBackground: backgroundMode,
+          backgroundQuality: activeBackgroundQuality,
           bufferedSeconds: Number.isFinite(audio.duration) ? Number(audio.duration.toFixed(2)) : null
         });
       }
@@ -357,45 +620,186 @@
       animationId = requestAnimationFrame(syncLoop);
     }
 
-    async function fetchFull(url, kind, mode) {
-      const started = performance.now();
-      const response = await fetch(url, {
-        method: "GET",
-        cache: "no-store",
-        signal: loadController.signal
-      });
-      if (!response.ok) throw new Error(kind + " HTTP " + response.status);
+    function setState(state, detail) {
+      el("state").textContent = state;
+      el("overlayState").textContent = state;
+      if (detail) el("preload").textContent = detail;
+    }
 
-      let payload;
-      let bytes;
-      if (mode === "arrayBuffer") {
-        payload = await response.arrayBuffer();
-        bytes = payload.byteLength;
-      } else {
-        payload = await response.blob();
-        bytes = payload.size;
+    function localLog(message, data) {
+      const line = "[" + new Date().toLocaleTimeString() + "] " + message +
+        (data ? "\n" + JSON.stringify(data, null, 2) : "");
+      el("tvLog").textContent = line + "\n\n" + el("tvLog").textContent;
+    }
+
+    function telemetrySnapshot() {
+      return {
+        rendererMetrics: {
+          renderer: rendererMetrics.renderer,
+          frames: rendererMetrics.frames,
+          fps: rendererMetrics.fps,
+          avgFrameMs: Number(rendererMetrics.avgFrameMs.toFixed(3)),
+          maxFrameMs: Number(rendererMetrics.maxFrameMs.toFixed(3)),
+          longFrames: rendererMetrics.longFrames,
+          throttledFrames: rendererMetrics.throttledFrames,
+          webgl: rendererMetrics.webgl,
+          gpu: rendererMetrics.gpu,
+          engine: cdgEngine.getMetrics()
+        },
+        frameMetrics: { ...frameMetrics },
+        backgroundMetrics: { ...backgroundMetrics },
+        transport: { ...transportMetrics }
+      };
+    }
+
+    function report(event, extra = {}, level = "info") {
+      if (!roomCode) {
+        localLog(event, extra);
+        return;
       }
-
-      const elapsedMs = Math.round(performance.now() - started);
-      report("TV_" + kind.toUpperCase() + "_DOWNLOADED", {
-        state: "preloading",
-        bytes,
-        elapsedMs,
-        mbps: Number(((bytes * 8 / 1000000) / Math.max(elapsedMs / 1000, 0.001)).toFixed(2))
+      socket.emit("player:status", {
+        event,
+        state: extra.state || el("state").textContent.toLowerCase(),
+        traceId: currentTraceId,
+        mediaId: currentMedia?.id || null,
+        rebufferCount,
+        level,
+        ...extra
       });
-      return { payload, bytes, elapsedMs };
+      localLog(event, extra);
+    }
+
+    function buildTvDiagnosticText() {
+      const snapshot = {
+        version: TV_CLIENT_VERSION,
+        generatedAt: new Date().toISOString(),
+        roomCode: roomCode || null,
+        traceId: currentTraceId || null,
+        state: el("state").textContent,
+        media: currentMedia ? {
+          id: currentMedia.id,
+          title: currentMedia.title,
+          format: currentMedia.format,
+          duration: currentMedia.duration,
+          cdgQuality: activeCdgQuality,
+          cdgBackground: backgroundMode,
+          backgroundQuality: activeBackgroundQuality,
+          videoQuality: currentMedia.videoQuality || null,
+          transport: currentMedia.transport || TRANSPORT_MODE
+        } : null,
+        rebufferCount,
+        preload: el("downloadMs").textContent,
+        video: {
+          width: video.videoWidth || 0,
+          height: video.videoHeight || 0,
+          readyState: video.readyState,
+          paused: video.paused,
+          currentTime: Number(video.currentTime || 0),
+          qualityReachedMs: videoQualityReachedMs
+        },
+        ...telemetrySnapshot()
+      };
+      return [
+        "KITKARAOKE · DIAGNÓSTICO TV",
+        "Sala: " + (roomCode || "SIN SALA"),
+        "traceId: " + (currentTraceId || "—"),
+        "Versión: " + TV_CLIENT_VERSION,
+        "Transporte: " + TRANSPORT_MODE + " · ICE/TURN: no aplica en este LAB",
+        "SNAPSHOT:",
+        JSON.stringify(snapshot, null, 2),
+        "",
+        "LOG COMPLETO TV",
+        "================",
+        "",
+        el("tvLog").textContent
+      ].join("\n");
+    }
+
+    async function copyTextWithFallback(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        try { await navigator.clipboard.writeText(text); return true; } catch (_) {}
+      }
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      document.body.appendChild(area);
+      area.focus();
+      area.select();
+      area.setSelectionRange(0, area.value.length);
+      let ok = false;
+      try { ok = document.execCommand("copy"); } catch (_) {}
+      area.remove();
+      return ok;
+    }
+
+    function downloadTextFile(name, content) {
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    async function fetchFull(url, kind, mode) {
+      const maxAttempts = 3;
+      let lastError = null;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const started = performance.now();
+        try {
+          const response = await fetch(url, {
+            method: "GET",
+            cache: "no-store",
+            signal: loadController.signal
+          });
+          if (!response.ok) throw new Error(kind + " HTTP " + response.status);
+          const acceptRanges = String(response.headers.get("accept-ranges") || "");
+          transportMetrics.rangeSupported = /bytes/i.test(acceptRanges);
+          let payload, bytes;
+          if (mode === "arrayBuffer") {
+            payload = await response.arrayBuffer();
+            bytes = payload.byteLength;
+          } else {
+            payload = await response.blob();
+            bytes = payload.size;
+          }
+          const elapsedMs = Math.round(performance.now() - started);
+          const mbps = Number(((bytes * 8 / 1000000) / Math.max(elapsedMs / 1000, 0.001)).toFixed(2));
+          transportMetrics.lastHttpMbps = mbps;
+          report("TV_" + kind.toUpperCase() + "_DOWNLOADED", {
+            state: "preloading", bytes, elapsedMs, mbps,
+            attempt, rangeSupported: transportMetrics.rangeSupported
+          });
+          return { payload, bytes, elapsedMs };
+        } catch (error) {
+          if (error.name === "AbortError") throw error;
+          lastError = error;
+          if (attempt >= maxAttempts) break;
+          transportMetrics.preloadRetries += 1;
+          report("TV_PRELOAD_RETRY", {
+            state: "preloading",
+            kind,
+            attempt,
+            nextAttempt: attempt + 1,
+            error: String(error.message || error)
+          }, "error");
+          await new Promise((resolve) => setTimeout(resolve, 250 * Math.pow(2, attempt - 1)));
+        }
+      }
+      throw lastError || new Error(kind + " download failed");
     }
 
     function waitMediaReady(element) {
       return new Promise((resolve, reject) => {
-        const done = () => {
-          cleanup();
-          resolve();
-        };
+        const done = () => { cleanup(); resolve(); };
         const fail = () => {
           const message = element.error?.message || "media decode error";
-          cleanup();
-          reject(new Error(message));
+          cleanup(); reject(new Error(message));
         };
         const cleanup = () => {
           element.removeEventListener("loadedmetadata", done);
@@ -409,38 +813,58 @@
       });
     }
 
-    async function loadCdg(media) {
+    async function loadCdg(media, seq) {
       const started = performance.now();
       const [cdgResult, audioResult] = await Promise.all([
         fetchFull(media.urls.cdg, "cdg", "arrayBuffer"),
         fetchFull(media.urls.audio, "audio", "blob")
       ]);
-
+      if (seq !== loadSeq) throw new DOMException("Stale load", "AbortError");
       cdgEngine.load(new Uint8Array(cdgResult.payload));
       audioBlobUrl = URL.createObjectURL(audioResult.payload);
       audio.src = audioBlobUrl;
       await waitMediaReady(audio);
+      if (seq !== loadSeq) throw new DOMException("Stale load", "AbortError");
       audio.currentTime = 0;
       cdgEngine.sync(0);
-
-      const elapsedMs = Math.round(performance.now() - started);
       return {
-        elapsedMs,
+        elapsedMs: Math.round(performance.now() - started),
         bytes: cdgResult.bytes + audioResult.bytes,
-        cdgBytes: cdgResult.bytes,
-        audioBytes: audioResult.bytes,
         duration: Number.isFinite(audio.duration) ? audio.duration : media.duration
       };
     }
 
-    async function loadVideo(media) {
+    function maybeReportVideoResolution() {
+      if (cdgMode || !currentMedia) return;
+      const w = video.videoWidth || 0;
+      const h = video.videoHeight || 0;
+      const q = normalizeVideoQuality(currentMedia.videoQuality || "auto");
+      const target = VIDEO_HEIGHTS[q] || 0;
+      if (target && h >= target && videoQualityReachedMs == null) {
+        videoQualityReachedMs = Math.round(performance.now() - videoLoadStartedAt);
+      }
+      report("TV_VIDEO_RESOLUTION", {
+        state: mediaReady ? (video.paused ? "ready" : "play") : "preloading",
+        videoWidth: w,
+        videoHeight: h,
+        videoQuality: q,
+        targetHeight: target || null,
+        qualityReachedMs: videoQualityReachedMs
+      });
+    }
+
+    async function loadVideo(media, seq) {
       const started = performance.now();
+      videoLoadStartedAt = started;
+      videoQualityReachedMs = null;
       const result = await fetchFull(media.urls.video, "video", "blob");
+      if (seq !== loadSeq) throw new DOMException("Stale load", "AbortError");
       videoBlobUrl = URL.createObjectURL(result.payload);
       video.src = videoBlobUrl;
       await waitMediaReady(video);
+      if (seq !== loadSeq) throw new DOMException("Stale load", "AbortError");
       video.currentTime = 0;
-
+      maybeReportVideoResolution();
       return {
         elapsedMs: Math.round(performance.now() - started),
         bytes: result.bytes,
@@ -448,12 +872,18 @@
       };
     }
 
-    async function loadMedia(media) {
+    async function loadMedia(media, sentAt) {
       if (!media?.urls) return;
+      if (sentAt && sentAt < lastLoadSentAt) {
+        report("TV_LOAD_IGNORED_STALE", { state: "preloading", sentAt, lastLoadSentAt }, "error");
+        return;
+      }
+      if (sentAt) lastLoadSentAt = sentAt;
+      const seq = ++loadSeq;
       if (loadController) loadController.abort();
       loadController = new AbortController();
-
       stopLoop();
+      videoFrameGeneration += 1;
       audio.pause();
       video.pause();
       clearObjectUrls();
@@ -465,12 +895,20 @@
       currentMedia = media;
       currentTraceId = media.traceId || null;
       mediaReady = false;
+      readySeq = 0;
       cdgMode = String(media.format).toUpperCase() === "CDG";
       rebufferCount = 0;
+      frameMetrics.freezes = 0;
+      frameMetrics.longFrameGaps = 0;
+      frameMetrics.lastFrameGapMs = 0;
+      frameMetrics.maxFrameGapMs = 0;
+
       if (cdgMode) {
-        activateCdgQuality(media.cdgQuality || "original");
+        applyBackground(media.cdgBackground || "black", media.backgroundQuality || "normal", "media-load");
+        activateCdgQuality(media.cdgQuality || "original", "media-load");
       } else {
         activeCdgQuality = "original";
+        bgCanvas.classList.add("hidden");
       }
 
       el("traceShort").textContent = currentTraceId ? currentTraceId.slice(0, 8) : "—";
@@ -480,19 +918,24 @@
       el("readyDot").classList.remove("online");
       setVisible(null);
       setState("PRECARGANDO", "Descargando demo completo antes de PLAY…");
-
       report("TV_PRELOAD_START", {
         state: "preloading",
         format: media.format,
         cdgQuality: cdgMode ? activeCdgQuality : null,
         requestedCdgQuality: cdgMode ? requestedCdgQuality : null,
+        cdgBackground: cdgMode ? backgroundMode : null,
+        backgroundQuality: cdgMode ? activeBackgroundQuality : null,
+        videoQuality: cdgMode ? null : normalizeVideoQuality(media.videoQuality || "auto"),
         duration: media.duration,
-        preloadPolicy: media.preloadPolicy
+        preloadPolicy: media.preloadPolicy,
+        transport: { ...transportMetrics }
       });
 
       try {
-        const result = cdgMode ? await loadCdg(media) : await loadVideo(media);
+        const result = cdgMode ? await loadCdg(media, seq) : await loadVideo(media, seq);
+        if (seq !== loadSeq) return;
         mediaReady = true;
+        readySeq = seq;
         el("downloadMs").textContent = result.elapsedMs + " ms";
         el("readyDot").classList.add("online");
         setVisible(cdgMode ? "cdg" : "video");
@@ -503,7 +946,13 @@
           bytes: result.bytes,
           bufferedSeconds: Number((result.duration || media.duration || 0).toFixed(2)),
           cdgPackets: cdgMode ? cdgEngine.packets : null,
-          cdgQuality: cdgMode ? activeCdgQuality : null
+          cdgQuality: cdgMode ? activeCdgQuality : null,
+          cdgBackground: cdgMode ? backgroundMode : null,
+          backgroundQuality: cdgMode ? activeBackgroundQuality : null,
+          videoQuality: cdgMode ? null : normalizeVideoQuality(media.videoQuality || "auto"),
+          videoWidth: cdgMode ? null : video.videoWidth,
+          videoHeight: cdgMode ? null : video.videoHeight,
+          ...telemetrySnapshot()
         });
       } catch (error) {
         if (error.name === "AbortError") return;
@@ -511,36 +960,104 @@
         setState("ERROR", String(error.message || error));
         report("TV_PRELOAD_ERROR", {
           state: "error",
-          error: String(error.message || error)
+          error: String(error.message || error),
+          ...telemetrySnapshot()
         }, "error");
       }
     }
 
-    async function playCurrent() {
-      if (!mediaReady) {
-        report("TV_PLAY_REJECTED_NOT_READY", { state: "error" }, "error");
+    function classifyPlayError(error) {
+      const msg = String(error && error.message ? error.message : error || "");
+      if (/interrupted by a new load request|interrupted by a call to pause|AbortError/i.test(msg)) {
+        return { event: "TV_PLAY_ABORTED_BY_LOAD", blocked: false, message: msg };
+      }
+      return { event: "TV_AUTOPLAY_BLOCKED", blocked: true, message: msg };
+    }
+
+    function startVideoFrameWatch() {
+      const generation = ++videoFrameGeneration;
+      if (typeof video.requestVideoFrameCallback !== "function") return;
+      let lastAt = 0;
+      const frame = (now, meta) => {
+        if (generation !== videoFrameGeneration || cdgMode) return;
+        frameMetrics.presentedFrames = Number(meta?.presentedFrames || frameMetrics.presentedFrames + 1);
+        frameMetrics.windowFrames += 1;
+        if (lastAt && !video.paused) {
+          const gap = now - lastAt;
+          frameMetrics.lastFrameGapMs = Math.round(gap);
+          frameMetrics.maxFrameGapMs = Math.max(frameMetrics.maxFrameGapMs, Math.round(gap));
+          if (gap > 120) frameMetrics.longFrameGaps += 1;
+          if (gap > 600 && video.readyState >= 2) {
+            frameMetrics.freezes += 1;
+            report("TV_VIDEO_FREEZE", {
+              state: "play",
+              gapMs: Math.round(gap),
+              currentTime: Number(video.currentTime.toFixed(3)),
+              frameMetrics: { ...frameMetrics }
+            }, "error");
+          }
+        }
+        lastAt = now;
+        const elapsed = now - frameMetrics.windowAt;
+        if (elapsed >= 1000) {
+          frameMetrics.fps = Number((frameMetrics.windowFrames * 1000 / elapsed).toFixed(1));
+          frameMetrics.windowFrames = 0;
+          frameMetrics.windowAt = now;
+        }
+        video.requestVideoFrameCallback(frame);
+      };
+      video.requestVideoFrameCallback(frame);
+    }
+
+    function updateVideoPlaybackQuality() {
+      try {
+        const q = video.getVideoPlaybackQuality ? video.getVideoPlaybackQuality() : null;
+        if (q) {
+          frameMetrics.decodedFrames = Number(q.totalVideoFrames || 0);
+          frameMetrics.droppedFrames = Number(q.droppedVideoFrames || 0);
+        }
+      } catch (_) {}
+    }
+
+    async function playCurrent(expectedTraceId) {
+      if (expectedTraceId && currentTraceId && expectedTraceId !== currentTraceId) {
+        report("TV_PLAY_IGNORED_STALE_TRACE", {
+          state: "error", expectedTraceId, currentTraceId
+        }, "error");
         return;
       }
-
+      if (!mediaReady || readySeq !== loadSeq) {
+        report("TV_PLAY_REJECTED_NOT_READY", {
+          state: "error", readySeq, loadSeq
+        }, "error");
+        return;
+      }
       try {
         if (cdgMode) {
           await audio.play();
           startLoop();
+          startBackground();
         } else {
           await video.play();
+          startVideoFrameWatch();
         }
         setState("PLAY", "Reproduciendo desde memoria local");
         report("TV_PLAY", {
           state: "play",
           currentTime: cdgMode ? audio.currentTime : video.currentTime,
-          cdgQuality: cdgMode ? activeCdgQuality : null
+          cdgQuality: cdgMode ? activeCdgQuality : null,
+          cdgBackground: cdgMode ? backgroundMode : null,
+          backgroundQuality: cdgMode ? activeBackgroundQuality : null,
+          videoQuality: cdgMode ? null : normalizeVideoQuality(currentMedia?.videoQuality || "auto"),
+          ...telemetrySnapshot()
         });
       } catch (error) {
-        report("TV_AUTOPLAY_BLOCKED", {
-          state: "error",
-          error: String(error.message || error)
-        }, "error");
-        setState("TOCA LA TV", "El navegador bloqueó audio. Toca una vez la pantalla.");
+        const info = classifyPlayError(error);
+        report(info.event, {
+          state: info.blocked ? "error" : "ready",
+          error: info.message
+        }, info.blocked ? "error" : "info");
+        if (info.blocked) setState("TOCA LA TV", "El navegador bloqueó audio. Toca una vez la pantalla.");
       }
     }
 
@@ -550,11 +1067,13 @@
         cdgEngine.sync(audio.currentTime);
       } else {
         video.pause();
+        videoFrameGeneration += 1;
       }
       setState("PAUSE", "Pausado");
       report("TV_PAUSE", {
         state: "pause",
-        currentTime: cdgMode ? audio.currentTime : video.currentTime
+        currentTime: cdgMode ? audio.currentTime : video.currentTime,
+        ...telemetrySnapshot()
       });
     }
 
@@ -566,10 +1085,11 @@
       } else {
         video.pause();
         video.currentTime = 0;
+        videoFrameGeneration += 1;
       }
       stopLoop();
       setState("READY", "Detenido · demo sigue precargado");
-      report("TV_STOP", { state: "ready", currentTime: 0 });
+      report("TV_STOP", { state: "ready", currentTime: 0, ...telemetrySnapshot() });
     }
 
     function seekCurrent(position) {
@@ -584,6 +1104,24 @@
         state: cdgMode ? (audio.paused ? "pause" : "play") : (video.paused ? "pause" : "play"),
         currentTime: target
       });
+    }
+
+    function applyPlayerSettings(settings, source) {
+      if (!settings || typeof settings !== "object") return;
+      const nextQuality = normalizeQuality(settings.cdgQuality || requestedCdgQuality);
+      const nextBg = normalizeBg(settings.cdgBackground || backgroundMode);
+      const nextBgQuality = normalizeBgQuality(settings.backgroundQuality || requestedBackgroundQuality);
+      if (cdgMode || currentMedia?.format === "CDG") {
+        applyBackground(nextBg, nextBgQuality, source || "live-settings");
+        activateCdgQuality(nextQuality, source || "live-settings");
+        if (mediaReady) {
+          cdgEngine.render(true);
+          setVisible("cdg");
+        }
+      }
+      if (currentMedia && String(currentMedia.format).toUpperCase() !== "CDG") {
+        currentMedia.videoQuality = normalizeVideoQuality(settings.videoQuality || currentMedia.videoQuality || "auto");
+      }
     }
 
     async function unlockAudio() {
@@ -607,7 +1145,8 @@
       report(name, {
         state: cdgMode ? (audio.paused ? "pause" : "play") : (video.paused ? "pause" : "play"),
         currentTime: cdgMode ? audio.currentTime : video.currentTime,
-        rebufferCount
+        rebufferCount,
+        ...telemetrySnapshot()
       }, "error");
     }
 
@@ -615,16 +1154,19 @@
     audio.addEventListener("stalled", () => rebufferEvent("TV_AUDIO_STALLED"));
     video.addEventListener("waiting", () => rebufferEvent("TV_VIDEO_WAITING"));
     video.addEventListener("stalled", () => rebufferEvent("TV_VIDEO_STALLED"));
+    video.addEventListener("loadedmetadata", maybeReportVideoResolution);
+    video.addEventListener("resize", maybeReportVideoResolution);
 
     audio.addEventListener("ended", () => {
       stopLoop();
       setState("READY", "Demo terminado · permanece precargado");
-      report("TV_ENDED", { state: "ready", currentTime: audio.currentTime });
+      report("TV_ENDED", { state: "ready", currentTime: audio.currentTime, ...telemetrySnapshot() });
     });
-
     video.addEventListener("ended", () => {
+      videoFrameGeneration += 1;
+      updateVideoPlaybackQuality();
       setState("READY", "Demo terminado · permanece precargado");
-      report("TV_ENDED", { state: "ready", currentTime: video.currentTime });
+      report("TV_ENDED", { state: "ready", currentTime: video.currentTime, ...telemetrySnapshot() });
     });
 
     document.addEventListener("visibilitychange", () => {
@@ -633,32 +1175,62 @@
         hidden: document.hidden
       });
     });
+    window.addEventListener("resize", resizeBackground);
+
+    function joinRoom(code, reconnect) {
+      const normalized = String(code || "").trim().toUpperCase();
+      if (!normalized) return;
+      socket.emit("room:join", {
+        roomCode: normalized,
+        role: "tv",
+        reconnect: Boolean(reconnect),
+        currentTraceId,
+        mediaReady,
+        transportMode: TRANSPORT_MODE,
+        clientVersion: TV_CLIENT_VERSION
+      }, (response) => {
+        if (!response || !response.ok) {
+          if (!reconnect) {
+            el("roomLabel").textContent = "NO ENCONTRADA";
+            el("roomInfo").textContent = response?.error || "Error al vincular";
+          } else {
+            localStorage.removeItem("kitkaraoke-tv-room");
+            roomCode = null;
+            localLog("Reconexión de sala rechazada", response || {});
+          }
+          return;
+        }
+        roomCode = response.room.code;
+        localStorage.setItem("kitkaraoke-tv-room", roomCode);
+        el("roomInput").value = roomCode;
+        el("roomLabel").textContent = roomCode;
+        el("roomInfo").textContent = reconnect ? "TV reconectada automáticamente" : "TV vinculada correctamente";
+        if (!mediaReady) setState("LISTA", "Esperando karaoke");
+        report(reconnect ? "TV_RECONNECTED" : "TV_CONNECTED", {
+          state: mediaReady ? el("state").textContent.toLowerCase() : "lista",
+          connected: true,
+          transport: { ...transportMetrics }
+        });
+      });
+    }
 
     el("copyTvLogs").addEventListener("click", async () => {
       const text = buildTvDiagnosticText();
       const button = el("copyTvLogs");
       const status = el("copyTvStatus");
       const original = button.textContent;
-
       button.disabled = true;
       button.textContent = "Copiando…";
       const ok = await copyTextWithFallback(text);
-
       if (ok) {
         button.textContent = "✓ Copiado";
-        status.textContent =
-          "Copiado completo: " + text.length.toLocaleString() +
+        status.textContent = "Copiado completo: " + text.length.toLocaleString() +
           " caracteres · trace " + (currentTraceId ? currentTraceId.slice(0, 8) : "—");
       } else {
         button.textContent = "No se pudo copiar";
-        status.textContent =
-          "El navegador bloqueó el portapapeles. Usa Descargar TXT.";
+        status.textContent = "El navegador bloqueó el portapapeles. Usa Descargar TXT.";
       }
-
-      setTimeout(() => {
-        button.disabled = false;
-        button.textContent = original;
-      }, 2200);
+      setTimeout(() => { button.disabled = false; button.textContent = original; }, 2200);
     });
 
     el("downloadTvLogs").addEventListener("click", () => {
@@ -666,29 +1238,49 @@
       const room = roomCode || "SIN_SALA";
       const trace = currentTraceId ? currentTraceId.slice(0, 8) : "SIN_TRACE";
       const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-      downloadTextFile(
-        "KITKARAOKE_TV_" + room + "_" + trace + "_" + stamp + ".txt",
-        text
-      );
-      el("copyTvStatus").textContent =
-        "TXT generado con el log completo de la TV.";
+      downloadTextFile("KITKARAOKE_TV_" + room + "_" + trace + "_" + stamp + ".txt", text);
+      el("copyTvStatus").textContent = "TXT generado con el log completo de la TV.";
     });
 
     el("screen").addEventListener("click", () => {
       unlockAudio();
-      if (mediaReady && el("state").textContent === "TOCA LA TV") playCurrent();
+      if (mediaReady && el("state").textContent === "TOCA LA TV") playCurrent(currentTraceId);
     });
 
     socket.on("connect", () => {
+      transportMetrics.socketConnected = true;
+      transportMetrics.socketTransport = socket.io?.engine?.transport?.name || null;
       el("dot").classList.add("online");
       el("connection").textContent = "Servidor conectado";
-      localLog("Socket TV conectado", { socketId: socket.id });
+      localLog("Socket TV conectado", {
+        socketId: socket.id,
+        transport: transportMetrics.socketTransport,
+        mode: TRANSPORT_MODE
+      });
+      const saved = localStorage.getItem("kitkaraoke-tv-room");
+      if (saved) joinRoom(saved, true);
+      try {
+        socket.io.engine.once("upgrade", () => {
+          transportMetrics.socketTransport = socket.io.engine.transport.name;
+          localLog("Socket transport actualizado", { transport: transportMetrics.socketTransport });
+        });
+      } catch (_) {}
     });
 
-    socket.on("disconnect", () => {
+    socket.on("disconnect", (reason) => {
+      transportMetrics.socketConnected = false;
+      transportMetrics.reconnectCount += 1;
       el("dot").classList.remove("online");
-      el("connection").textContent = "Servidor desconectado";
-      localLog("Socket TV desconectado");
+      el("connection").textContent = mediaReady ? "Servidor desconectado · media local sigue" : "Servidor desconectado";
+      localLog("Socket TV desconectado", {
+        reason,
+        mediaPreserved: mediaReady,
+        reconnectCount: transportMetrics.reconnectCount
+      });
+    });
+
+    socket.on("connect_error", (error) => {
+      localLog("Socket connect_error", { error: String(error?.message || error) });
     });
 
     socket.on("room:state", (room) => {
@@ -696,33 +1288,40 @@
       el("roomInfo").textContent =
         room.tvCount + " TV conectada(s) · " +
         String(room.playback.state || "idle").toUpperCase();
+      if (room.settings) applyPlayerSettings(room.settings, "room-state");
+    });
+
+    socket.on("player:settings", (event) => {
+      if (event.traceId && currentTraceId && event.traceId !== currentTraceId) return;
+      applyPlayerSettings(event.settings || {}, "panel-live");
     });
 
     socket.on("player:command", async (event) => {
       const command = String(event.command || "").toUpperCase();
-
       if (command === "LOAD" && event.media) {
-        await loadMedia(event.media);
+        await loadMedia(event.media, Number(event.sentAt || 0));
         return;
       }
       if (command === "PLAY") {
-        await playCurrent();
+        await playCurrent(event.traceId || null);
         return;
       }
-      if (command === "PAUSE") {
-        pauseCurrent();
+      if (event.traceId && currentTraceId && event.traceId !== currentTraceId) {
+        report("TV_COMMAND_IGNORED_STALE_TRACE", {
+          state: el("state").textContent.toLowerCase(),
+          command,
+          commandTraceId: event.traceId,
+          currentTraceId
+        }, "error");
         return;
       }
-      if (command === "STOP") {
-        stopCurrent();
-        return;
-      }
-      if (command === "SEEK") {
-        seekCurrent(event.position);
-      }
+      if (command === "PAUSE") { pauseCurrent(); return; }
+      if (command === "STOP") { stopCurrent(); return; }
+      if (command === "SEEK") seekCurrent(event.position);
     });
 
     socket.on("room:expired", () => {
+      localStorage.removeItem("kitkaraoke-tv-room");
       roomCode = null;
       el("roomLabel").textContent = "SALA EXPIRADA";
       el("roomInfo").textContent = "Vuelve a vincular la TV";
@@ -730,30 +1329,42 @@
     });
 
     el("roomInput").addEventListener("input", (event) => {
-      event.target.value = event.target.value
-        .toUpperCase()
-        .replace(/[^A-Z0-9]/g, "")
-        .slice(0, 6);
+      event.target.value = event.target.value.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6);
     });
 
     el("join").addEventListener("click", async () => {
       await unlockAudio();
-      const code = el("roomInput").value.trim().toUpperCase();
-
-      socket.emit("room:join", { roomCode: code, role: "tv" }, (response) => {
-        if (!response.ok) {
-          el("roomLabel").textContent = "NO ENCONTRADA";
-          el("roomInfo").textContent = response.error || "Error al vincular";
-          return;
-        }
-
-        roomCode = response.room.code;
-        el("roomLabel").textContent = roomCode;
-        el("roomInfo").textContent = "TV vinculada correctamente";
-        setState("LISTA", "Esperando karaoke");
-        report("TV_CONNECTED", { state: "lista", connected: true });
-      });
+      joinRoom(el("roomInput").value, false);
     });
+
+    setInterval(() => {
+      if (!socket.connected || !roomCode) return;
+      const started = performance.now();
+      socket.emit("transport:ping", { clientAt: Date.now() }, (response) => {
+        if (!response?.ok) return;
+        transportMetrics.socketRttMs = Math.round(performance.now() - started);
+        el("transportRtt").textContent = transportMetrics.socketRttMs + " ms";
+      });
+    }, 5000);
+
+    setInterval(() => {
+      if (!roomCode) return;
+      updateVideoPlaybackQuality();
+      report("TV_PERF_SAMPLE", {
+        state: el("state").textContent.toLowerCase(),
+        currentTime: cdgMode ? Number(audio.currentTime || 0) : Number(video.currentTime || 0),
+        cdgQuality: cdgMode ? activeCdgQuality : null,
+        cdgBackground: cdgMode ? backgroundMode : null,
+        backgroundQuality: cdgMode ? activeBackgroundQuality : null,
+        videoQuality: cdgMode ? null : normalizeVideoQuality(currentMedia?.videoQuality || "auto"),
+        videoWidth: cdgMode ? null : video.videoWidth,
+        videoHeight: cdgMode ? null : video.videoHeight,
+        ...telemetrySnapshot()
+      });
+    }, 5000);
+
+    resizeBackground();
+    startBackground();
   </script>
 </body>
 </html>
