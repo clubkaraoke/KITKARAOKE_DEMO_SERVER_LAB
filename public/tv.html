@@ -257,7 +257,8 @@
       }
     }
 
-    function resetPlaybackMetrics() {
+    function resetRendererMetrics(rendererName = rendererMetrics.renderer) {
+      rendererMetrics.renderer = rendererName;
       rendererMetrics.frames = 0;
       rendererMetrics.throttledFrames = 0;
       rendererMetrics.longFrames = 0;
@@ -266,6 +267,16 @@
       rendererMetrics.fps = 0;
       rendererMetrics.windowFrames = 0;
       rendererMetrics.windowAt = performance.now();
+      el("rendererFps").textContent = "—";
+    }
+
+    function resetBackgroundPerformanceMetrics() {
+      resetBackgroundPerformanceMetrics();
+      el("backgroundFps").textContent = "—";
+    }
+
+    function resetPlaybackMetrics() {
+      resetRendererMetrics();
 
       frameMetrics.presentedFrames = 0;
       frameMetrics.decodedFrames = 0;
@@ -352,7 +363,7 @@
       qualityRendererError = reason;
       setVisible(cdgMode ? "cdg" : null);
       report("TV_RENDERER_FALLBACK", {
-        state: mediaReady ? "ready" : "preloading",
+        state: playbackStateForDiagnostic(),
         requestedQuality: requested,
         activeQuality: "original",
         fallbackReason: reason
@@ -577,7 +588,7 @@
       bgPoorWindows = 0;
       resizeBackground();
       report("TV_BACKGROUND_FALLBACK", {
-        state: mediaReady ? "ready" : "preloading",
+        state: playbackStateForDiagnostic(),
         requestedQuality: requestedBackgroundQuality,
         previousQuality: previous,
         activeQuality: activeBackgroundQuality,
@@ -586,8 +597,12 @@
     }
 
     function applyBackground(mode, quality, source) {
-      backgroundMode = normalizeBg(mode);
-      requestedBackgroundQuality = normalizeBgQuality(quality);
+      const nextMode = normalizeBg(mode);
+      const nextRequestedQuality = normalizeBgQuality(quality);
+      const changed = nextMode !== backgroundMode || nextRequestedQuality !== requestedBackgroundQuality;
+      if (changed) resetBackgroundPerformanceMetrics();
+      backgroundMode = nextMode;
+      requestedBackgroundQuality = nextRequestedQuality;
       activeBackgroundQuality = requestedBackgroundQuality;
       backgroundMetrics.mode = backgroundMode;
       backgroundMetrics.requestedQuality = requestedBackgroundQuality;
@@ -605,7 +620,7 @@
       cdgEngine.setTransparentBackground(true);
       if (source) {
         report("TV_BACKGROUND_SELECTED", {
-          state: mediaReady ? "ready" : "preloading",
+          state: playbackStateForDiagnostic(),
           backgroundMode,
           backgroundQuality: requestedBackgroundQuality,
           source
@@ -632,17 +647,21 @@
       requestedCdgQuality = normalizeQuality(requested);
       let selected = requestedCdgQuality;
       let fallback = null;
+      const previousActiveQuality = activeCdgQuality;
       if (selected !== "original" && !ensureQualityRenderer(selected)) {
         fallback = qualityRendererError || "Renderer WebGL no disponible";
         selected = "original";
       }
       activeCdgQuality = selected;
+      if (previousActiveQuality !== activeCdgQuality) {
+        resetRendererMetrics(QUALITY_LABELS[activeCdgQuality] || activeCdgQuality);
+      }
       lastQualityRenderAt = 0;
       if (sdfLabRenderer && sdfLabRenderer.setParams) sdfLabRenderer.setParams({ transparentBackground: true });
       if (sdfProRenderer && sdfProRenderer.setParams) sdfProRenderer.setParams({ transparentBackground: true });
       setVisible(cdgMode ? "cdg" : null);
       report(fallback ? "TV_RENDERER_FALLBACK" : "TV_RENDERER_SELECTED", {
-        state: mediaReady ? "ready" : "preloading",
+        state: playbackStateForDiagnostic(),
         requestedQuality: requestedCdgQuality,
         activeQuality: activeCdgQuality,
         qualityLabel: QUALITY_LABELS[activeCdgQuality],
@@ -688,6 +707,16 @@
       stopLoop();
       lastSyncLogAt = 0;
       animationId = requestAnimationFrame(syncLoop);
+    }
+
+    function playbackStateForDiagnostic() {
+      const ui = String(el("state").textContent || "").trim().toLowerCase();
+      if (ui === "play" || ui === "pause" || ui === "ready" || ui === "preloading") return ui;
+      if (!mediaReady) return "preloading";
+      const element = cdgMode ? audio : video;
+      if (!element.paused && !element.ended) return "play";
+      if (element.ended) return "ready";
+      return "ready";
     }
 
     function setState(state, detail) {
