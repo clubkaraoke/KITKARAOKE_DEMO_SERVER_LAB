@@ -6,64 +6,439 @@
   <title>KITKARAOKE · DEMO TV LAB</title>
   <link rel="stylesheet" href="/app.css">
 </head>
-<body>
-  <main class="shell">
+<body class="tv-body">
+  <main class="shell tv-shell">
     <div class="topbar">
       <div>
         <div class="brand">KITKARAOKE · DEMO TV</div>
-        <div class="muted">Pantalla vinculada — Fase 1</div>
+        <div class="muted">Fase 3 · precarga completa · CDG sincronizado por audio</div>
       </div>
       <div class="badge"><span id="dot" class="dot"></span><span id="connection">Conectando…</span></div>
     </div>
 
-    <section class="hero">
-      <div class="card">
+    <section class="tv-layout">
+      <div class="card tv-pair-card">
         <div class="kicker">Vincular pantalla</div>
-        <h1>TV</h1>
-        <p class="muted">Ingresa el código de 6 caracteres mostrado en el Panel DJ.</p>
+        <h2>TV</h2>
         <div class="row">
           <input id="roomInput" maxlength="6" autocomplete="off" placeholder="ABC123">
           <button id="join">Vincular</button>
         </div>
-        <div style="height:16px"></div>
-        <div class="stat">
-          <strong id="roomLabel">SIN SALA</strong>
-          <span id="roomInfo">Esperando vinculación</span>
+        <div class="agent-state" style="margin-top:14px;margin-bottom:0">
+          <div>
+            <strong id="roomLabel">SIN SALA</strong>
+            <div id="roomInfo" class="inline-note">Esperando vinculación</div>
+          </div>
+          <span id="readyDot" class="dot"></span>
         </div>
       </div>
 
-      <div class="screen">
-        <div>
+      <div class="screen tv-screen" id="screen">
+        <canvas id="cdgCanvas" class="tv-cdg hidden"></canvas>
+        <video id="video" class="tv-video hidden" playsinline preload="auto"></video>
+        <audio id="audio" preload="auto"></audio>
+
+        <div id="emptyScreen" class="tv-empty">
           <div class="kicker">Pantalla de reproducción</div>
           <h1 id="state">ESPERANDO</h1>
-          <p id="media" class="muted">Aquí entraremos con MP4 o CDG en las siguientes fases.</p>
+          <p id="media" class="muted">La TV precarga el demo completo antes de PLAY.</p>
+          <div id="preload" class="preload-meter">Sin media</div>
+        </div>
+
+        <div id="overlay" class="tv-overlay hidden">
+          <strong id="overlayState">READY</strong>
+          <span id="overlayTitle"></span>
         </div>
       </div>
+    </section>
+
+    <section class="card tv-diag-card">
+      <div class="kicker">Diagnóstico TV</div>
+      <div class="status-grid">
+        <div class="stat"><strong id="traceShort">—</strong><span>traceId</span></div>
+        <div class="stat"><strong id="downloadMs">—</strong><span>Precarga</span></div>
+        <div class="stat"><strong id="rebuffer">0</strong><span>Rebuffer</span></div>
+      </div>
+      <div id="tvLog" class="log compact-log">Esperando media…</div>
     </section>
   </main>
 
   <script src="/socket.io/socket.io.js"></script>
+  <script src="/cdg-engine-lite.js"></script>
   <script>
     const socket = io();
     const el = (id) => document.getElementById(id);
-    let roomCode = null;
 
-    function report(extra = {}) {
+    const audio = el("audio");
+    const video = el("video");
+    const cdgCanvas = el("cdgCanvas");
+    const cdgEngine = window.KITKARAOKE_CDG_ENGINE.create(cdgCanvas);
+
+    let roomCode = null;
+    let currentMedia = null;
+    let currentTraceId = null;
+    let mediaReady = false;
+    let cdgMode = false;
+    let loadController = null;
+    let audioBlobUrl = null;
+    let videoBlobUrl = null;
+    let animationId = 0;
+    let lastSyncLogAt = 0;
+    let rebufferCount = 0;
+
+    function localLog(message, data) {
+      const line = "[" + new Date().toLocaleTimeString() + "] " + message +
+        (data ? "\n" + JSON.stringify(data, null, 2) : "");
+      el("tvLog").textContent = line + "\n\n" + el("tvLog").textContent;
+    }
+
+    function report(event, extra = {}, level = "info") {
       if (!roomCode) return;
       socket.emit("player:status", {
-        state: el("state").textContent.toLowerCase(),
+        event,
+        state: extra.state || el("state").textContent.toLowerCase(),
+        traceId: currentTraceId,
+        mediaId: currentMedia?.id || null,
+        rebufferCount,
+        level,
         ...extra
       });
+      localLog(event, extra);
     }
+
+    function setState(state, detail) {
+      el("state").textContent = state;
+      el("overlayState").textContent = state;
+      if (detail) el("preload").textContent = detail;
+    }
+
+    function setVisible(kind) {
+      const isCdg = kind === "cdg";
+      const isVideo = kind === "video";
+      cdgCanvas.classList.toggle("hidden", !isCdg);
+      video.classList.toggle("hidden", !isVideo);
+      el("emptyScreen").classList.toggle("hidden", isCdg || isVideo);
+      el("overlay").classList.toggle("hidden", !(isCdg || isVideo));
+    }
+
+    function clearObjectUrls() {
+      if (audioBlobUrl) URL.revokeObjectURL(audioBlobUrl);
+      if (videoBlobUrl) URL.revokeObjectURL(videoBlobUrl);
+      audioBlobUrl = null;
+      videoBlobUrl = null;
+    }
+
+    function stopLoop() {
+      cancelAnimationFrame(animationId);
+      animationId = 0;
+    }
+
+    function syncLoop(ts) {
+      if (!cdgMode || !mediaReady) return;
+      const sync = cdgEngine.sync(audio.currentTime);
+
+      if (ts - lastSyncLogAt >= 2000) {
+        lastSyncLogAt = ts;
+        report("TV_SYNC_SAMPLE", {
+          state: audio.paused ? "pause" : "play",
+          currentTime: Number(audio.currentTime.toFixed(3)),
+          cdgTime: Number(sync.cdgTime.toFixed(3)),
+          skewMs: sync.skewMs,
+          bufferedSeconds: Number.isFinite(audio.duration) ? Number(audio.duration.toFixed(2)) : null
+        });
+      }
+      animationId = requestAnimationFrame(syncLoop);
+    }
+
+    function startLoop() {
+      stopLoop();
+      lastSyncLogAt = 0;
+      animationId = requestAnimationFrame(syncLoop);
+    }
+
+    async function fetchFull(url, kind, mode) {
+      const started = performance.now();
+      const response = await fetch(url, {
+        method: "GET",
+        cache: "no-store",
+        signal: loadController.signal
+      });
+      if (!response.ok) throw new Error(kind + " HTTP " + response.status);
+
+      let payload;
+      let bytes;
+      if (mode === "arrayBuffer") {
+        payload = await response.arrayBuffer();
+        bytes = payload.byteLength;
+      } else {
+        payload = await response.blob();
+        bytes = payload.size;
+      }
+
+      const elapsedMs = Math.round(performance.now() - started);
+      report("TV_" + kind.toUpperCase() + "_DOWNLOADED", {
+        state: "preloading",
+        bytes,
+        elapsedMs,
+        mbps: Number(((bytes * 8 / 1000000) / Math.max(elapsedMs / 1000, 0.001)).toFixed(2))
+      });
+      return { payload, bytes, elapsedMs };
+    }
+
+    function waitMediaReady(element) {
+      return new Promise((resolve, reject) => {
+        const done = () => {
+          cleanup();
+          resolve();
+        };
+        const fail = () => {
+          const message = element.error?.message || "media decode error";
+          cleanup();
+          reject(new Error(message));
+        };
+        const cleanup = () => {
+          element.removeEventListener("loadedmetadata", done);
+          element.removeEventListener("canplay", done);
+          element.removeEventListener("error", fail);
+        };
+        element.addEventListener("loadedmetadata", done, { once: true });
+        element.addEventListener("canplay", done, { once: true });
+        element.addEventListener("error", fail, { once: true });
+        element.load();
+      });
+    }
+
+    async function loadCdg(media) {
+      const started = performance.now();
+      const [cdgResult, audioResult] = await Promise.all([
+        fetchFull(media.urls.cdg, "cdg", "arrayBuffer"),
+        fetchFull(media.urls.audio, "audio", "blob")
+      ]);
+
+      cdgEngine.load(new Uint8Array(cdgResult.payload));
+      audioBlobUrl = URL.createObjectURL(audioResult.payload);
+      audio.src = audioBlobUrl;
+      await waitMediaReady(audio);
+      audio.currentTime = 0;
+      cdgEngine.sync(0);
+
+      const elapsedMs = Math.round(performance.now() - started);
+      return {
+        elapsedMs,
+        bytes: cdgResult.bytes + audioResult.bytes,
+        cdgBytes: cdgResult.bytes,
+        audioBytes: audioResult.bytes,
+        duration: Number.isFinite(audio.duration) ? audio.duration : media.duration
+      };
+    }
+
+    async function loadVideo(media) {
+      const started = performance.now();
+      const result = await fetchFull(media.urls.video, "video", "blob");
+      videoBlobUrl = URL.createObjectURL(result.payload);
+      video.src = videoBlobUrl;
+      await waitMediaReady(video);
+      video.currentTime = 0;
+
+      return {
+        elapsedMs: Math.round(performance.now() - started),
+        bytes: result.bytes,
+        duration: Number.isFinite(video.duration) ? video.duration : media.duration
+      };
+    }
+
+    async function loadMedia(media) {
+      if (!media?.urls) return;
+      if (loadController) loadController.abort();
+      loadController = new AbortController();
+
+      stopLoop();
+      audio.pause();
+      video.pause();
+      clearObjectUrls();
+      audio.removeAttribute("src");
+      video.removeAttribute("src");
+      audio.load();
+      video.load();
+
+      currentMedia = media;
+      currentTraceId = media.traceId || null;
+      mediaReady = false;
+      cdgMode = String(media.format).toUpperCase() === "CDG";
+      rebufferCount = 0;
+
+      el("traceShort").textContent = currentTraceId ? currentTraceId.slice(0, 8) : "—";
+      el("rebuffer").textContent = "0";
+      el("overlayTitle").textContent = media.title || "Karaoke";
+      el("media").textContent = (media.title || "Karaoke") + " · " + media.format;
+      el("readyDot").classList.remove("online");
+      setVisible(null);
+      setState("PRECARGANDO", "Descargando demo completo antes de PLAY…");
+
+      report("TV_PRELOAD_START", {
+        state: "preloading",
+        format: media.format,
+        duration: media.duration,
+        preloadPolicy: media.preloadPolicy
+      });
+
+      try {
+        const result = cdgMode ? await loadCdg(media) : await loadVideo(media);
+        mediaReady = true;
+        el("downloadMs").textContent = result.elapsedMs + " ms";
+        el("readyDot").classList.add("online");
+        setVisible(cdgMode ? "cdg" : "video");
+        setState("READY", "100% precargado · reproducción local");
+        report("TV_READY", {
+          state: "ready",
+          elapsedMs: result.elapsedMs,
+          bytes: result.bytes,
+          bufferedSeconds: Number((result.duration || media.duration || 0).toFixed(2)),
+          cdgPackets: cdgMode ? cdgEngine.packets : null
+        });
+      } catch (error) {
+        if (error.name === "AbortError") return;
+        mediaReady = false;
+        setState("ERROR", String(error.message || error));
+        report("TV_PRELOAD_ERROR", {
+          state: "error",
+          error: String(error.message || error)
+        }, "error");
+      }
+    }
+
+    async function playCurrent() {
+      if (!mediaReady) {
+        report("TV_PLAY_REJECTED_NOT_READY", { state: "error" }, "error");
+        return;
+      }
+
+      try {
+        if (cdgMode) {
+          await audio.play();
+          startLoop();
+        } else {
+          await video.play();
+        }
+        setState("PLAY", "Reproduciendo desde memoria local");
+        report("TV_PLAY", {
+          state: "play",
+          currentTime: cdgMode ? audio.currentTime : video.currentTime
+        });
+      } catch (error) {
+        report("TV_AUTOPLAY_BLOCKED", {
+          state: "error",
+          error: String(error.message || error)
+        }, "error");
+        setState("TOCA LA TV", "El navegador bloqueó audio. Toca una vez la pantalla.");
+      }
+    }
+
+    function pauseCurrent() {
+      if (cdgMode) {
+        audio.pause();
+        cdgEngine.sync(audio.currentTime);
+      } else {
+        video.pause();
+      }
+      setState("PAUSE", "Pausado");
+      report("TV_PAUSE", {
+        state: "pause",
+        currentTime: cdgMode ? audio.currentTime : video.currentTime
+      });
+    }
+
+    function stopCurrent() {
+      if (cdgMode) {
+        audio.pause();
+        audio.currentTime = 0;
+        cdgEngine.sync(0);
+      } else {
+        video.pause();
+        video.currentTime = 0;
+      }
+      stopLoop();
+      setState("READY", "Detenido · demo sigue precargado");
+      report("TV_STOP", { state: "ready", currentTime: 0 });
+    }
+
+    function seekCurrent(position) {
+      const target = Math.max(0, Number(position || 0));
+      if (cdgMode) {
+        audio.currentTime = target;
+        cdgEngine.sync(target);
+      } else {
+        video.currentTime = target;
+      }
+      report("TV_SEEK", {
+        state: cdgMode ? (audio.paused ? "pause" : "play") : (video.paused ? "pause" : "play"),
+        currentTime: target
+      });
+    }
+
+    async function unlockAudio() {
+      try {
+        const Ctx = window.AudioContext || window.webkitAudioContext;
+        if (Ctx) {
+          const ctx = new Ctx();
+          await ctx.resume();
+          await ctx.close();
+        }
+        localLog("Audio desbloqueado por interacción del usuario");
+      } catch (error) {
+        localLog("No se pudo pre-desbloquear audio", { error: String(error) });
+      }
+    }
+
+    function rebufferEvent(name) {
+      if (!mediaReady) return;
+      rebufferCount += 1;
+      el("rebuffer").textContent = String(rebufferCount);
+      report(name, {
+        state: cdgMode ? (audio.paused ? "pause" : "play") : (video.paused ? "pause" : "play"),
+        currentTime: cdgMode ? audio.currentTime : video.currentTime,
+        rebufferCount
+      }, "error");
+    }
+
+    audio.addEventListener("waiting", () => rebufferEvent("TV_AUDIO_WAITING"));
+    audio.addEventListener("stalled", () => rebufferEvent("TV_AUDIO_STALLED"));
+    video.addEventListener("waiting", () => rebufferEvent("TV_VIDEO_WAITING"));
+    video.addEventListener("stalled", () => rebufferEvent("TV_VIDEO_STALLED"));
+
+    audio.addEventListener("ended", () => {
+      stopLoop();
+      setState("READY", "Demo terminado · permanece precargado");
+      report("TV_ENDED", { state: "ready", currentTime: audio.currentTime });
+    });
+
+    video.addEventListener("ended", () => {
+      setState("READY", "Demo terminado · permanece precargado");
+      report("TV_ENDED", { state: "ready", currentTime: video.currentTime });
+    });
+
+    document.addEventListener("visibilitychange", () => {
+      report("TV_VISIBILITY_CHANGE", {
+        state: document.hidden ? "hidden" : "visible",
+        hidden: document.hidden
+      });
+    });
+
+    el("screen").addEventListener("click", () => {
+      unlockAudio();
+      if (mediaReady && el("state").textContent === "TOCA LA TV") playCurrent();
+    });
 
     socket.on("connect", () => {
       el("dot").classList.add("online");
       el("connection").textContent = "Servidor conectado";
+      localLog("Socket TV conectado", { socketId: socket.id });
     });
 
     socket.on("disconnect", () => {
       el("dot").classList.remove("online");
       el("connection").textContent = "Servidor desconectado";
+      localLog("Socket TV desconectado");
     });
 
     socket.on("room:state", (room) => {
@@ -73,28 +448,35 @@
         String(room.playback.state || "idle").toUpperCase();
     });
 
-    socket.on("player:command", (event) => {
-      const command = event.command;
-      el("state").textContent = command;
+    socket.on("player:command", async (event) => {
+      const command = String(event.command || "").toUpperCase();
 
       if (command === "LOAD" && event.media) {
-        el("media").textContent =
-          (event.media.title || "Demo") + " · " +
-          (event.media.format || "media");
+        await loadMedia(event.media);
+        return;
       }
-
+      if (command === "PLAY") {
+        await playCurrent();
+        return;
+      }
+      if (command === "PAUSE") {
+        pauseCurrent();
+        return;
+      }
       if (command === "STOP") {
-        el("media").textContent = "Reproducción detenida";
+        stopCurrent();
+        return;
       }
-
-      report({ lastCommand: command, media: event.media || null });
+      if (command === "SEEK") {
+        seekCurrent(event.position);
+      }
     });
 
     socket.on("room:expired", () => {
       roomCode = null;
       el("roomLabel").textContent = "SALA EXPIRADA";
       el("roomInfo").textContent = "Vuelve a vincular la TV";
-      el("state").textContent = "ESPERANDO";
+      setState("ESPERANDO", "Sin sala");
     });
 
     el("roomInput").addEventListener("input", (event) => {
@@ -104,7 +486,8 @@
         .slice(0, 6);
     });
 
-    el("join").addEventListener("click", () => {
+    el("join").addEventListener("click", async () => {
+      await unlockAudio();
       const code = el("roomInput").value.trim().toUpperCase();
 
       socket.emit("room:join", { roomCode: code, role: "tv" }, (response) => {
@@ -117,8 +500,8 @@
         roomCode = response.room.code;
         el("roomLabel").textContent = roomCode;
         el("roomInfo").textContent = "TV vinculada correctamente";
-        el("state").textContent = "LISTA";
-        report({ connected: true });
+        setState("LISTA", "Esperando karaoke");
+        report("TV_CONNECTED", { state: "lista", connected: true });
       });
     });
   </script>
