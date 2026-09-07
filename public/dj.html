@@ -11,7 +11,7 @@
     <div class="topbar">
       <div>
         <div class="brand">KITKARAOKE · DEMO SERVER LAB</div>
-        <div class="muted">Panel DJ — Fase 2 · Agente PC</div>
+        <div class="muted">Panel DJ — Fase 3 · reproducción real + diagnóstico permanente</div>
       </div>
       <div class="badge"><span id="dot" class="dot"></span><span id="connection">Conectando…</span></div>
     </div>
@@ -20,17 +20,16 @@
       <div class="card">
         <div class="kicker">Sala temporal</div>
         <h1>Control DJ</h1>
-        <p class="muted">Crea una sala, vincula la TV y luego conecta el agente de tu PC para buscar en tu catálogo local.</p>
+        <p class="muted">Crea una sala, vincula TV y Agent. El demo se prepara en tu PC, se guarda temporalmente en OVH y la TV lo precarga al 100% antes de PLAY.</p>
 
         <button id="createRoom">Crear sala demo</button>
-
         <div style="height:16px"></div>
         <div id="roomCode" class="room-code">------</div>
 
         <div class="status-grid">
           <div class="stat"><strong id="tvCount">0</strong><span>TV conectadas</span></div>
           <div class="stat"><strong id="playback">IDLE</strong><span>Estado</span></div>
-          <div class="stat"><strong id="roomStatus">SIN SALA</strong><span>Sesión</span></div>
+          <div class="stat"><strong id="tvReady">0/0</strong><span>TV READY</span></div>
         </div>
       </div>
 
@@ -41,12 +40,22 @@
           <button id="play" disabled>▶ Play</button>
           <button id="pause" class="secondary" disabled>⏸ Pausa</button>
           <button id="stop" class="danger" disabled>■ Stop</button>
-          <button id="load" class="secondary" disabled>Demo de prueba</button>
+          <select id="demoDuration" aria-label="Duración del demo">
+            <option value="30">Demo 30 s</option>
+            <option value="45" selected>Demo 45 s</option>
+            <option value="60">Demo 60 s</option>
+          </select>
         </div>
 
-        <div style="height:18px"></div>
-        <h2>Diagnóstico</h2>
-        <div id="log" class="log">Esperando conexión…</div>
+        <div class="stage-box">
+          <span class="dot" id="stageDot"></span>
+          <div>
+            <strong id="stage">SIN MEDIA</strong>
+            <div id="stageInfo" class="inline-note">Busca una canción y pulsa Preparar demo.</div>
+          </div>
+        </div>
+
+        <div class="trace-line">traceId: <code id="traceId">—</code></div>
       </div>
     </section>
 
@@ -54,12 +63,11 @@
       <div class="card">
         <div class="kicker">Servidor local</div>
         <h2>KITKARAOKE Agent</h2>
-        <p class="muted">El agente corre en tu PC y solo sale hacia OVH. El servidor web no puede explorar tu disco directamente.</p>
 
         <div class="agent-state">
           <div>
             <strong id="agentStatus">NO VINCULADO</strong>
-            <div id="agentInfo" class="inline-note">Abre el agente en tu PC y copia su código.</div>
+            <div id="agentInfo" class="inline-note">Abre el Agent en tu PC y copia su código.</div>
           </div>
           <span id="agentDot" class="dot"></span>
         </div>
@@ -68,13 +76,13 @@
           <input id="agentCode" maxlength="6" autocomplete="off" placeholder="Código Agent">
           <button id="linkAgent" disabled>Vincular PC</button>
         </div>
-        <div class="inline-note">El código queda asociado únicamente a esta sala mientras el agente esté online.</div>
 
         <div class="status-grid">
           <div class="stat"><strong id="agentSongs">0</strong><span>Canciones</span></div>
           <div class="stat"><strong id="agentVideo">0</strong><span>Video</span></div>
           <div class="stat"><strong id="agentCdg">0</strong><span>CDG + audio</span></div>
         </div>
+        <div id="agentCaps" class="inline-note">Esperando capacidades del Agent.</div>
       </div>
 
       <div class="card">
@@ -88,6 +96,29 @@
         <div id="results" class="results"></div>
       </div>
     </section>
+
+    <section class="card stack">
+      <div class="diag-head">
+        <div>
+          <div class="kicker">Diagnóstico permanente</div>
+          <h2>Logs paso a paso</h2>
+          <p class="muted">Cada reproducción queda identificada por traceId. No se guardan tokens ni rutas privadas del disco.</p>
+        </div>
+        <div class="diag-actions">
+          <button id="downloadTxt" class="secondary" disabled>Descargar TXT</button>
+          <button id="downloadJson" class="secondary" disabled>Descargar JSON</button>
+          <button id="clearLogs" class="danger" disabled>Limpiar vista</button>
+        </div>
+      </div>
+
+      <div class="diag-summary">
+        <span>Último paso: <strong id="lastEvent">—</strong></span>
+        <span>Errores: <strong id="errorCount">0</strong></span>
+        <span>Eventos: <strong id="eventCount">0</strong></span>
+      </div>
+
+      <div id="log" class="log diag-log">Esperando conexión…</div>
+    </section>
   </main>
 
   <script src="/socket.io/socket.io.js"></script>
@@ -95,19 +126,82 @@
     const socket = io();
     let roomCode = null;
     let agentOnline = false;
+    let currentTraceId = null;
+    let diagnosticEvents = [];
+    let currentRoomState = null;
 
     const el = (id) => document.getElementById(id);
     const logEl = el("log");
-    const commandButtons = ["play", "pause", "stop", "load"].map(el);
 
-    function log(message, data) {
+    function simpleLog(message, data) {
       const line = "[" + new Date().toLocaleTimeString() + "] " + message +
         (data ? "\n" + JSON.stringify(data, null, 2) : "");
       logEl.textContent = line + "\n\n" + logEl.textContent;
     }
 
-    function setCommands(enabled) {
-      commandButtons.forEach((button) => { button.disabled = !enabled; });
+    function formatDiag(entry) {
+      const time = new Date(entry.epochMs || Date.parse(entry.ts)).toLocaleTimeString();
+      const trace = entry.traceId ? " [" + entry.traceId.slice(0, 8) + "]" : "";
+      const level = entry.level === "error" ? " ERROR" : "";
+      const data = entry.data && Object.keys(entry.data).length
+        ? "\n" + JSON.stringify(entry.data, null, 2)
+        : "";
+      return "[" + time + "]" + trace + " " + entry.source + " · " + entry.event + level + data;
+    }
+
+    function addDiagnostic(entry) {
+      diagnosticEvents.push(entry);
+      if (diagnosticEvents.length > 1500) diagnosticEvents.shift();
+      logEl.textContent = formatDiag(entry) + "\n\n" + logEl.textContent;
+      el("lastEvent").textContent = entry.event || "—";
+      el("eventCount").textContent = String(diagnosticEvents.length);
+      el("errorCount").textContent = String(
+        diagnosticEvents.filter((event) => event.level === "error").length
+      );
+      el("downloadTxt").disabled = false;
+      el("downloadJson").disabled = false;
+      el("clearLogs").disabled = false;
+
+      if (entry.traceId) {
+        currentTraceId = entry.traceId;
+        el("traceId").textContent = currentTraceId;
+      }
+    }
+
+    function updateStage(room) {
+      currentRoomState = room;
+      const state = String(room?.playback?.state || "idle").toLowerCase();
+      const labels = {
+        idle: "SIN MEDIA",
+        preparing: "PREPARANDO EN PC",
+        preloading: "PRECARGANDO TV",
+        ready: "READY · SIN LAG",
+        playing: "REPRODUCIENDO",
+        paused: "PAUSADO",
+        error: "ERROR",
+        stopped: "DETENIDO"
+      };
+      el("stage").textContent = labels[state] || state.toUpperCase();
+      el("stageDot").classList.toggle("online", ["ready", "playing", "paused"].includes(state));
+      el("stageInfo").textContent =
+        state === "preparing" ? "Agent está preparando y subiendo el demo temporal." :
+        state === "preloading" ? "La TV está descargando el demo completo antes de PLAY." :
+        state === "ready" ? "TV precargada al 100%. Ya puedes pulsar PLAY." :
+        state === "playing" ? "La reproducción usa media local precargada en la TV." :
+        state === "error" ? "Revisa los logs inferiores; el traceId identifica el fallo." :
+        "Busca una canción y pulsa Preparar demo.";
+
+      el("play").disabled = !["ready", "paused", "playing"].includes(state);
+      el("pause").disabled = !["playing", "paused"].includes(state);
+      el("stop").disabled = !["ready", "playing", "paused"].includes(state);
+      el("playback").textContent = state.toUpperCase();
+      el("tvCount").textContent = room?.tvCount || 0;
+      el("tvReady").textContent = (room?.tvReadyCount || 0) + "/" + (room?.tvCount || 0);
+
+      if (room?.playback?.traceId) {
+        currentTraceId = room.playback.traceId;
+        el("traceId").textContent = currentTraceId;
+      }
     }
 
     function setAgentState(agent) {
@@ -122,14 +216,18 @@
       el("agentCdg").textContent = Number(summary.cdgWithAudio || 0).toLocaleString();
 
       if (agentOnline) {
-        el("agentInfo").textContent =
-          (agent.name || "KITKARAOKE Agent") + " · código " + agent.code;
+        el("agentInfo").textContent = (agent.name || "KITKARAOKE Agent") + " · código " + agent.code;
+        const caps = agent.capabilities || {};
+        el("agentCaps").textContent =
+          "FFmpeg: " + (caps.ffmpeg ? "LISTO" : "NO") +
+          " · CDG→AAC: " + (caps.cdgAacDemo ? "LISTO" : "NO") +
+          " · MP4 H.264: " + (caps.mp4H264Demo ? "LISTO" : "NO");
         el("searchNote").textContent = "PC conectado. Escribe artista o título.";
-      } else if (agent) {
-        el("agentInfo").textContent = "Código " + agent.code + " · agente desconectado";
-        el("searchNote").textContent = "El agente está offline.";
       } else {
-        el("agentInfo").textContent = "Abre el agente en tu PC y copia su código.";
+        el("agentInfo").textContent = agent
+          ? "Código " + agent.code + " · agente desconectado"
+          : "Abre el Agent en tu PC y copia su código.";
+        el("agentCaps").textContent = "Esperando capacidades del Agent.";
         el("searchNote").textContent = "Vincula primero el KITKARAOKE Agent.";
       }
     }
@@ -137,70 +235,68 @@
     socket.on("connect", () => {
       el("dot").classList.add("online");
       el("connection").textContent = "Servidor conectado";
-      log("Socket conectado", { socketId: socket.id });
+      simpleLog("Socket DJ conectado", { socketId: socket.id });
     });
 
     socket.on("disconnect", () => {
       el("dot").classList.remove("online");
       el("connection").textContent = "Servidor desconectado";
-      setCommands(false);
-      el("searchButton").disabled = true;
-      log("Socket desconectado");
+      el("play").disabled = true;
+      el("pause").disabled = true;
+      el("stop").disabled = true;
+      simpleLog("Socket desconectado");
     });
 
     socket.on("room:state", (room) => {
       if (roomCode && room.code !== roomCode) return;
       if (!roomCode && room.hasDj) return;
-      el("tvCount").textContent = room.tvCount;
-      el("playback").textContent = String(room.playback.state || "idle").toUpperCase();
-      el("roomStatus").textContent = room.hasDj ? "ACTIVA" : "SIN DJ";
-      setCommands(Boolean(roomCode));
+      updateStage(room);
       setAgentState(room.agent || null);
     });
 
+    socket.on("diagnostic:event", (entry) => {
+      addDiagnostic(entry);
+    });
+
     socket.on("player:status", (status) => {
-      log("Estado recibido desde TV", status);
+      if (status.traceId) currentTraceId = status.traceId;
+    });
+
+    socket.on("media:prepared", (payload) => {
+      currentTraceId = payload.traceId;
+      el("traceId").textContent = currentTraceId;
     });
 
     socket.on("agent:search:result", (payload) => {
       el("searchNote").textContent =
         payload.totalMatches + " coincidencia(s) · " + payload.elapsedMs + " ms";
       renderResults(payload.results || []);
-      log("Resultados recibidos del Agent", {
-        requestId: payload.requestId,
-        results: (payload.results || []).length,
-        elapsedMs: payload.elapsedMs
-      });
     });
 
-    socket.on("agent:search:error", (payload) => {
+    socket.on("agent:search:error", () => {
       el("searchNote").textContent = "La búsqueda no respondió a tiempo.";
-      log("Error de búsqueda Agent", payload);
     });
 
     socket.on("room:expired", () => {
-      log("La sala expiró");
       roomCode = null;
       el("roomCode").textContent = "------";
-      setCommands(false);
       el("linkAgent").disabled = true;
       setAgentState(null);
+      updateStage(null);
+      simpleLog("La sala expiró");
     });
 
     el("createRoom").addEventListener("click", () => {
       socket.emit("room:create", {}, (response) => {
         if (!response.ok) {
-          log("No se pudo crear sala", response);
+          simpleLog("No se pudo crear sala", response);
           return;
         }
         roomCode = response.room.code;
         el("roomCode").textContent = roomCode;
-        el("tvCount").textContent = response.room.tvCount;
-        el("roomStatus").textContent = "ACTIVA";
         el("linkAgent").disabled = false;
-        setCommands(true);
+        updateStage(response.room);
         setAgentState(response.room.agent || null);
-        log("Sala creada", response.room);
       });
     });
 
@@ -214,23 +310,57 @@
     el("linkAgent").addEventListener("click", () => {
       const code = el("agentCode").value.trim().toUpperCase();
       if (!roomCode) return;
-
       socket.emit("agent:link", { agentCode: code }, (response) => {
         if (!response.ok) {
           el("agentStatus").textContent = "NO ENCONTRADO";
           el("agentInfo").textContent = response.error || "No se pudo vincular";
-          log("No se pudo vincular Agent", response);
           return;
         }
         setAgentState(response.room.agent);
-        log("KITKARAOKE Agent vinculado", response.room.agent);
       });
     });
 
     function send(command, extra = {}) {
       if (!roomCode) return;
       socket.emit("player:command", { command, ...extra }, (response) => {
-        log("Comando " + command, response);
+        if (!response.ok) {
+          simpleLog("Comando " + command + " rechazado", response);
+        }
+      });
+    }
+
+    function prepare(item, button) {
+      if (!roomCode || !agentOnline) return;
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Preparando…";
+
+      const media = {
+        id: item.id,
+        title: item.artist ? item.artist + " - " + item.title : item.title,
+        format: item.format,
+        audio: item.audio || null,
+        source: "KITKARAOKE_AGENT"
+      };
+
+      socket.emit("media:prepare", {
+        media,
+        duration: Number(el("demoDuration").value || 45),
+        origin: location.origin
+      }, (response) => {
+        if (!response.ok) {
+          button.disabled = false;
+          button.textContent = original;
+          simpleLog("No se pudo preparar demo", response);
+          return;
+        }
+        currentTraceId = response.traceId;
+        el("traceId").textContent = currentTraceId;
+        button.textContent = "En proceso";
+        setTimeout(() => {
+          button.disabled = false;
+          button.textContent = original;
+        }, 2500);
       });
     }
 
@@ -250,9 +380,7 @@
         const left = document.createElement("div");
         const title = document.createElement("div");
         title.className = "result-title";
-        title.textContent = item.artist
-          ? item.artist + " - " + item.title
-          : item.title;
+        title.textContent = item.artist ? item.artist + " - " + item.title : item.title;
 
         const meta = document.createElement("div");
         meta.className = "result-meta";
@@ -265,18 +393,8 @@
         left.appendChild(meta);
 
         const button = document.createElement("button");
-        button.textContent = "Cargar en TV";
-        button.addEventListener("click", () => {
-          send("LOAD", {
-            media: {
-              id: item.id,
-              title: item.artist ? item.artist + " - " + item.title : item.title,
-              format: item.format,
-              audio: item.audio || null,
-              source: "KITKARAOKE_AGENT"
-            }
-          });
-        });
+        button.textContent = "Preparar demo";
+        button.addEventListener("click", () => prepare(item, button));
 
         row.appendChild(left);
         row.appendChild(button);
@@ -289,16 +407,63 @@
       if (!agentOnline || query.length < 2) return;
       el("searchNote").textContent = "Buscando en tu PC…";
       el("results").innerHTML = "";
-
       socket.emit("agent:search", { query, limit: 50 }, (response) => {
         if (!response.ok) {
           el("searchNote").textContent = response.error || "No se pudo buscar";
-          log("Error enviando búsqueda", response);
-          return;
         }
-        log("Búsqueda enviada al Agent", response);
       });
     }
+
+    function getDiagnostics(callback) {
+      if (!roomCode) return;
+      socket.emit("diagnostics:get", {}, (response) => {
+        if (!response.ok) {
+          simpleLog("No se pudieron recuperar logs", response);
+          return;
+        }
+        callback(response);
+      });
+    }
+
+    function downloadBlob(name, type, content) {
+      const blob = new Blob([content], { type });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    el("downloadJson").addEventListener("click", () => {
+      getDiagnostics((response) => {
+        const name = "KITKARAOKE_DIAGNOSTICO_" + roomCode + "_" + new Date().toISOString().replace(/[:.]/g, "-") + ".json";
+        downloadBlob(name, "application/json", JSON.stringify(response, null, 2));
+      });
+    });
+
+    el("downloadTxt").addEventListener("click", () => {
+      getDiagnostics((response) => {
+        const header =
+          "KITKARAOKE · DIAGNÓSTICO\n" +
+          "Sala: " + roomCode + "\n" +
+          "Generado: " + response.generatedAt + "\n" +
+          "Estado: " + JSON.stringify(response.room.playback) + "\n\n";
+        const body = response.events.map(formatDiag).join("\n\n");
+        const name = "KITKARAOKE_DIAGNOSTICO_" + roomCode + "_" + new Date().toISOString().replace(/[:.]/g, "-") + ".txt";
+        downloadBlob(name, "text/plain;charset=utf-8", header + body);
+      });
+    });
+
+    el("clearLogs").addEventListener("click", () => {
+      diagnosticEvents = [];
+      logEl.textContent = "Vista de diagnóstico limpia. El siguiente evento aparecerá aquí.";
+      el("lastEvent").textContent = "—";
+      el("eventCount").textContent = "0";
+      el("errorCount").textContent = "0";
+    });
 
     el("searchButton").addEventListener("click", search);
     el("searchQuery").addEventListener("keydown", (event) => {
@@ -308,13 +473,6 @@
     el("play").addEventListener("click", () => send("PLAY"));
     el("pause").addEventListener("click", () => send("PAUSE"));
     el("stop").addEventListener("click", () => send("STOP"));
-    el("load").addEventListener("click", () => send("LOAD", {
-      media: {
-        id: "LAB-DEMO-001",
-        title: "Karaoke de prueba",
-        format: "placeholder"
-      }
-    }));
   </script>
 </body>
 </html>
