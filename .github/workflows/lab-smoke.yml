@@ -21,8 +21,18 @@ jobs:
       - name: Install
         run: npm install
 
-      - name: Syntax check
+      - name: Syntax check server
         run: npm run check
+
+      - name: Syntax check Windows agent
+        run: python3 -m py_compile agent/windows/agent.py
+
+      - name: Verify agent safety contract
+        run: |
+          grep -q 'agent:register' src/server.js
+          grep -q 'agent:search' src/server.js
+          grep -q 'NO se envían a OVH' agent/windows/agent.py
+          grep -q 'CDG_EXT' agent/windows/agent.py
 
       - name: Start server
         run: |
@@ -30,9 +40,11 @@ jobs:
           echo $! > server.pid
           sleep 3
 
-      - name: Health check
+      - name: Health check phase 2
         run: |
-          curl --fail --silent http://127.0.0.1:3000/health
+          curl --fail --silent http://127.0.0.1:3000/health | tee /tmp/health.json
+          grep -q '"phase":2' /tmp/health.json
+          grep -q '"agentsOnline":0' /tmp/health.json
           echo
 
       - name: Show logs on failure
