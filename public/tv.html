@@ -55,7 +55,17 @@
     </section>
 
     <section class="card tv-diag-card">
-      <div class="kicker">Diagnóstico TV</div>
+      <div class="tv-diag-head">
+        <div>
+          <div class="kicker">Diagnóstico TV</div>
+          <div class="inline-note">Copia todo el log aunque no esté visible en pantalla.</div>
+        </div>
+        <div class="tv-diag-actions">
+          <button id="copyTvLogs" class="secondary" type="button">Copiar logs TV</button>
+          <button id="downloadTvLogs" class="secondary" type="button">Descargar TXT</button>
+        </div>
+      </div>
+      <div id="copyTvStatus" class="inline-note copy-status">Listo para copiar.</div>
       <div class="status-grid">
         <div class="stat"><strong id="traceShort">—</strong><span>traceId</span></div>
         <div class="stat"><strong id="downloadMs">—</strong><span>Precarga</span></div>
@@ -183,6 +193,69 @@
     let animationId = 0;
     let lastSyncLogAt = 0;
     let rebufferCount = 0;
+
+    function buildTvDiagnosticText() {
+      const quality = QUALITY_LABELS[activeCdgQuality] || activeCdgQuality || "—";
+      const header = [
+        "KITKARAOKE · DIAGNÓSTICO TV",
+        "Sala: " + (roomCode || "SIN SALA"),
+        "traceId: " + (currentTraceId || "—"),
+        "Estado: " + el("state").textContent,
+        "Media: " + (currentMedia?.title || "—"),
+        "Formato: " + (currentMedia?.format || "—"),
+        "Calidad CDG: " + quality,
+        "Precarga: " + el("downloadMs").textContent,
+        "Rebuffer: " + rebufferCount,
+        "Generado: " + new Date().toISOString(),
+        "",
+        "LOG COMPLETO TV",
+        "================",
+        ""
+      ].join("\n");
+
+      return header + el("tvLog").textContent;
+    }
+
+    async function copyTextWithFallback(text) {
+      if (navigator.clipboard && window.isSecureContext) {
+        try {
+          await navigator.clipboard.writeText(text);
+          return true;
+        } catch (_) {}
+      }
+
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.setAttribute("readonly", "");
+      area.style.position = "fixed";
+      area.style.left = "-9999px";
+      area.style.top = "0";
+      document.body.appendChild(area);
+      area.focus();
+      area.select();
+      area.setSelectionRange(0, area.value.length);
+
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } catch (_) {
+        ok = false;
+      }
+      area.remove();
+      return ok;
+    }
+
+    function downloadTextFile(name, content) {
+      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
 
     function localLog(message, data) {
       const line = "[" + new Date().toLocaleTimeString() + "] " + message +
@@ -559,6 +632,46 @@
         state: document.hidden ? "hidden" : "visible",
         hidden: document.hidden
       });
+    });
+
+    el("copyTvLogs").addEventListener("click", async () => {
+      const text = buildTvDiagnosticText();
+      const button = el("copyTvLogs");
+      const status = el("copyTvStatus");
+      const original = button.textContent;
+
+      button.disabled = true;
+      button.textContent = "Copiando…";
+      const ok = await copyTextWithFallback(text);
+
+      if (ok) {
+        button.textContent = "✓ Copiado";
+        status.textContent =
+          "Copiado completo: " + text.length.toLocaleString() +
+          " caracteres · trace " + (currentTraceId ? currentTraceId.slice(0, 8) : "—");
+      } else {
+        button.textContent = "No se pudo copiar";
+        status.textContent =
+          "El navegador bloqueó el portapapeles. Usa Descargar TXT.";
+      }
+
+      setTimeout(() => {
+        button.disabled = false;
+        button.textContent = original;
+      }, 2200);
+    });
+
+    el("downloadTvLogs").addEventListener("click", () => {
+      const text = buildTvDiagnosticText();
+      const room = roomCode || "SIN_SALA";
+      const trace = currentTraceId ? currentTraceId.slice(0, 8) : "SIN_TRACE";
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      downloadTextFile(
+        "KITKARAOKE_TV_" + room + "_" + trace + "_" + stamp + ".txt",
+        text
+      );
+      el("copyTvStatus").textContent =
+        "TXT generado con el log completo de la TV.";
     });
 
     el("screen").addEventListener("click", () => {
