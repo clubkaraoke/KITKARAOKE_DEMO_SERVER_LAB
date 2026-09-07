@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>KITKARAOKE · DEMO TV LAB</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <div class="topbar">
+      <div>
+        <div class="brand">KITKARAOKE · DEMO TV</div>
+        <div class="muted">Pantalla vinculada — Fase 1</div>
+      </div>
+      <div class="badge"><span id="dot" class="dot"></span><span id="connection">Conectando…</span></div>
+    </div>
+
+    <section class="hero">
+      <div class="card">
+        <div class="kicker">Vincular pantalla</div>
+        <h1>TV</h1>
+        <p class="muted">Ingresa el código de 6 caracteres mostrado en el Panel DJ.</p>
+        <div class="row">
+          <input id="roomInput" maxlength="6" autocomplete="off" placeholder="ABC123">
+          <button id="join">Vincular</button>
+        </div>
+        <div style="height:16px"></div>
+        <div class="stat">
+          <strong id="roomLabel">SIN SALA</strong>
+          <span id="roomInfo">Esperando vinculación</span>
+        </div>
+      </div>
+
+      <div class="screen">
+        <div>
+          <div class="kicker">Pantalla de reproducción</div>
+          <h1 id="state">ESPERANDO</h1>
+          <p id="media" class="muted">Aquí entraremos con MP4 o CDG en las siguientes fases.</p>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    const el = (id) => document.getElementById(id);
+    let roomCode = null;
+
+    function report(extra = {}) {
+      if (!roomCode) return;
+      socket.emit("player:status", {
+        state: el("state").textContent.toLowerCase(),
+        ...extra
+      });
+    }
+
+    socket.on("connect", () => {
+      el("dot").classList.add("online");
+      el("connection").textContent = "Servidor conectado";
+    });
+
+    socket.on("disconnect", () => {
+      el("dot").classList.remove("online");
+      el("connection").textContent = "Servidor desconectado";
+    });
+
+    socket.on("room:state", (room) => {
+      if (roomCode && room.code !== roomCode) return;
+      el("roomInfo").textContent =
+        room.tvCount + " TV conectada(s) · " +
+        String(room.playback.state || "idle").toUpperCase();
+    });
+
+    socket.on("player:command", (event) => {
+      const command = event.command;
+      el("state").textContent = command;
+
+      if (command === "LOAD" && event.media) {
+        el("media").textContent =
+          (event.media.title || "Demo") + " · " +
+          (event.media.format || "media");
+      }
+
+      if (command === "STOP") {
+        el("media").textContent = "Reproducción detenida";
+      }
+
+      report({ lastCommand: command, media: event.media || null });
+    });
+
+    socket.on("room:expired", () => {
+      roomCode = null;
+      el("roomLabel").textContent = "SALA EXPIRADA";
+      el("roomInfo").textContent = "Vuelve a vincular la TV";
+      el("state").textContent = "ESPERANDO";
+    });
+
+    el("roomInput").addEventListener("input", (event) => {
+      event.target.value = event.target.value
+        .toUpperCase()
+        .replace(/[^A-Z0-9]/g, "")
+        .slice(0, 6);
+    });
+
+    el("join").addEventListener("click", () => {
+      const code = el("roomInput").value.trim().toUpperCase();
+
+      socket.emit("room:join", { roomCode: code, role: "tv" }, (response) => {
+        if (!response.ok) {
+          el("roomLabel").textContent = "NO ENCONTRADA";
+          el("roomInfo").textContent = response.error || "Error al vincular";
+          return;
+        }
+
+        roomCode = response.room.code;
+        el("roomLabel").textContent = roomCode;
+        el("roomInfo").textContent = "TV vinculada correctamente";
+        el("state").textContent = "LISTA";
+        report({ connected: true });
+      });
+    });
+  </script>
+</body>
+</html>
