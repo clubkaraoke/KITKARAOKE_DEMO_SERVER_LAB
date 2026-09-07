@@ -276,7 +276,9 @@ function createMediaJob(room, media, duration) {
       cdgQuality: normalizeCdgQuality(media.cdgQuality || room.settings.cdgQuality),
       cdgBackground: normalizeCdgBackground(media.cdgBackground || room.settings.cdgBackground),
       backgroundQuality: normalizeBackgroundQuality(media.backgroundQuality || room.settings.backgroundQuality),
-      videoQuality: normalizeVideoQuality(media.videoQuality || room.settings.videoQuality),
+      videoQuality: String(media.format || "").toUpperCase() === "CDG"
+        ? null
+        : normalizeVideoQuality(media.videoQuality || room.settings.videoQuality),
       source: "KITKARAOKE_AGENT"
     },
     duration: [30, 45, 60].includes(Number(duration)) ? Number(duration) : 45,
@@ -999,21 +1001,24 @@ io.on("connection", (socket) => {
     const state = String(payload.state || "").toLowerCase();
     const traceId = String(payload.traceId || room.playback.traceId || "") || null;
 
-    if (state === "ready") {
+    const eventName = String(payload.event || ("TV_" + (state || "STATUS").toUpperCase())).slice(0, 100);
+
+    // Solo eventos de transporte/reproducción pueden mutar el estado autoritativo.
+    // Telemetría visual (renderer, fondo, perf) puede reportar "ready" como contexto
+    // sin detener una canción que realmente sigue en PLAY.
+    if (eventName === "TV_READY" || eventName === "TV_STOP" || eventName === "TV_ENDED") {
       room.readyTvSocketIds.add(socket.id);
       if (room.tvSocketIds.size > 0 && room.readyTvSocketIds.size >= room.tvSocketIds.size) {
         room.playback.state = "ready";
       }
       emitRoomState(room);
-    } else if (state === "play" || state === "playing") {
+    } else if (eventName === "TV_PLAY") {
       room.playback.state = "playing";
       emitRoomState(room);
-    } else if (state === "pause" || state === "paused") {
+    } else if (eventName === "TV_PAUSE") {
       room.playback.state = "paused";
       emitRoomState(room);
     }
-
-    const eventName = String(payload.event || ("TV_" + (state || "STATUS").toUpperCase())).slice(0, 100);
     diag(room.code, "TV", eventName, {
       socketId: socket.id,
       state,
@@ -1035,6 +1040,20 @@ io.on("connection", (socket) => {
       frameMetrics: safeObject(payload.frameMetrics || {}),
       backgroundMetrics: safeObject(payload.backgroundMetrics || {}),
       transport: safeObject(payload.transport || {}),
+      requestedQuality: payload.requestedQuality || null,
+      previousQuality: payload.previousQuality || null,
+      activeQuality: payload.activeQuality || null,
+      reason: payload.reason || null,
+      fallbackReason: payload.fallbackReason || null,
+      diagnosticSource: payload.source || null,
+      attempt: payload.attempt ?? null,
+      nextAttempt: payload.nextAttempt ?? null,
+      mbps: payload.mbps ?? null,
+      rangeSupported: payload.rangeSupported ?? null,
+      targetHeight: payload.targetHeight ?? null,
+      qualityReachedMs: payload.qualityReachedMs ?? null,
+      gapMs: payload.gapMs ?? null,
+      stallDurationMs: payload.stallDurationMs ?? null,
       error: payload.error || null
     }, traceId,
       payload.level === "error" ? "error" :
