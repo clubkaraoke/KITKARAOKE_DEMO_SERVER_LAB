@@ -84,7 +84,7 @@
   <script src="/sdf-karaoke-pro-renderer.js"></script>
   <script src="/cdg-engine-lite.js"></script>
   <script>
-    const TV_CLIENT_VERSION = "LAB-TV-4.0";
+    const TV_CLIENT_VERSION = "LAB-TV-4.1";
     const TRANSPORT_MODE = "HTTP_PRELOAD";
     const socket = io({
       reconnection: true,
@@ -139,6 +139,7 @@
     let sdfProRenderer = null;
     let qualityRendererError = null;
     let lastQualityRenderAt = 0;
+    const SDF_FRAME_MIN_MS = 25;
 
     let backgroundMode = "black";
     let requestedBackgroundQuality = "normal";
@@ -149,6 +150,8 @@
     let bgPerfWindowAt = performance.now();
     let bgPerfFrames = 0;
     let bgPoorWindows = 0;
+    let displayRafWindowAt = performance.now();
+    let displayRafFrames = 0;
 
     let roomCode = null;
     let currentMedia = null;
@@ -167,6 +170,11 @@
     let videoQualityReachedMs = null;
     let videoLoadStartedAt = 0;
     let videoFrameGeneration = 0;
+    let playbackHasProgressed = false;
+    let pendingBufferTimer = 0;
+    let pendingBufferEvent = null;
+    let pendingBufferStartedAt = 0;
+    let pendingBufferMediaTime = 0;
 
     const rendererMetrics = {
       renderer: "original",
@@ -202,7 +210,9 @@
       frames: 0,
       avgDrawMs: 0,
       maxDrawMs: 0,
-      fallbackCount: 0
+      fallbackCount: 0,
+      displayFps: 0,
+      effectiveTargetFps: 0
     };
     const transportMetrics = {
       mode: TRANSPORT_MODE,
@@ -245,6 +255,37 @@
       } catch (_) {
         return null;
       }
+    }
+
+    function resetPlaybackMetrics() {
+      rendererMetrics.frames = 0;
+      rendererMetrics.throttledFrames = 0;
+      rendererMetrics.longFrames = 0;
+      rendererMetrics.avgFrameMs = 0;
+      rendererMetrics.maxFrameMs = 0;
+      rendererMetrics.fps = 0;
+      rendererMetrics.windowFrames = 0;
+      rendererMetrics.windowAt = performance.now();
+
+      resetPlaybackMetrics();
+
+      backgroundMetrics.fps = 0;
+      backgroundMetrics.frames = 0;
+      backgroundMetrics.avgDrawMs = 0;
+      backgroundMetrics.maxDrawMs = 0;
+      backgroundMetrics.fallbackCount = 0;
+      backgroundMetrics.displayFps = 0;
+      backgroundMetrics.effectiveTargetFps = 0;
+      bgPerfFrames = 0;
+      bgPerfWindowAt = performance.now();
+      displayRafFrames = 0;
+      displayRafWindowAt = performance.now();
+      bgPoorWindows = 0;
+
+      playbackHasProgressed = false;
+      clearTimeout(pendingBufferTimer);
+      pendingBufferTimer = 0;
+      pendingBufferEvent = null;
     }
 
     function updateRendererMetric(frameMs, rendererName) {
@@ -315,7 +356,7 @@
         return;
       }
       const now = performance.now();
-      if (!meta.force && now - lastQualityRenderAt < 40) {
+      if (!meta.force && now - lastQualityRenderAt < SDF_FRAME_MIN_MS) {
         rendererMetrics.throttledFrames += 1;
         return;
       }
@@ -464,8 +505,20 @@
         const fps = bgPerfFrames * 1000 / elapsed;
         backgroundMetrics.fps = Number(fps.toFixed(1));
         el("backgroundFps").textContent = backgroundMode === "black" ? "—" : backgroundMetrics.fps.toFixed(1);
-        const target = BG_QUALITY[activeBackgroundQuality].fps;
-        if (!document.hidden && backgroundMode !== "black" && fps < target * 0.68) {
+        const profileTarget = BG_QUALITY[activeBackgroundQuality].fps;
+        const displayTarget = backgroundMetrics.displayFps > 0
+          ? backgroundMetrics.displayFps * 0.92
+          : profileTarget;
+        const effectiveTarget = Math.max(12, Math.min(profileTarget, displayTarget));
+        backgroundMetrics.effectiveTargetFps = Number(effectiveTarget.toFixed(1));
+
+        const playbackActive = cdgMode && !audio.paused && !audio.ended;
+        if (
+          playbackActive &&
+          !document.hidden &&
+          backgroundMode !== "black" &&
+          fps < effectiveTarget * 0.75
+        ) {
           bgPoorWindows += 1;
         } else {
           bgPoorWindows = 0;
@@ -477,6 +530,14 @@
     }
 
     function backgroundLoop(now) {
+      displayRafFrames += 1;
+      const rafElapsed = now - displayRafWindowAt;
+      if (rafElapsed >= 2000) {
+        backgroundMetrics.displayFps = Number((displayRafFrames * 1000 / rafElapsed).toFixed(1));
+        displayRafFrames = 0;
+        displayRafWindowAt = now;
+      }
+
       if (!cdgMode || backgroundMode === "black" || document.hidden) {
         bgAnimationId = requestAnimationFrame(backgroundLoop);
         return;
@@ -898,6 +959,7 @@
       readySeq = 0;
       cdgMode = String(media.format).toUpperCase() === "CDG";
       rebufferCount = 0;
+      playbackHasProgressed = false;
       frameMetrics.presentedFrames = 0;
       frameMetrics.decodedFrames = 0;
       frameMetrics.droppedFrames = 0;
@@ -1147,22 +1209,79 @@
       }
     }
 
-    function rebufferEvent(name) {
-      if (!mediaReady) return;
-      rebufferCount += 1;
-      el("rebuffer").textContent = String(rebufferCount);
-      report(name, {
-        state: cdgMode ? (audio.paused ? "pause" : "play") : (video.paused ? "pause" : "play"),
-        currentTime: cdgMode ? audio.currentTime : video.currentTime,
-        rebufferCount,
-        ...telemetrySnapshot()
-      }, "error");
+    function currentPlaybackElement() {
+      return cdgMode ? audio : video;
     }
 
-    audio.addEventListener("waiting", () => rebufferEvent("TV_AUDIO_WAITING"));
-    audio.addEventListener("stalled", () => rebufferEvent("TV_AUDIO_STALLED"));
-    video.addEventListener("waiting", () => rebufferEvent("TV_VIDEO_WAITING"));
-    video.addEventListener("stalled", () => rebufferEvent("TV_VIDEO_STALLED"));
+    function clearPendingBuffer(reason) {
+      if (!pendingBufferTimer) return;
+      const elapsed = Math.round(performance.now() - pendingBufferStartedAt);
+      clearTimeout(pendingBufferTimer);
+      pendingBufferTimer = 0;
+      if (pendingBufferEvent && elapsed >= 80) {
+        report("TV_BUFFERING_TRANSIENT", {
+          state: currentPlaybackElement().paused ? "pause" : "play",
+          sourceEvent: pendingBufferEvent,
+          reason,
+          currentTime: Number(currentPlaybackElement().currentTime || 0),
+          stallDurationMs: elapsed
+        }, "info");
+      }
+      pendingBufferEvent = null;
+    }
+
+    function beginBufferWatch(name) {
+      if (!mediaReady) return;
+      const element = currentPlaybackElement();
+      clearPendingBuffer("replaced");
+      pendingBufferEvent = name;
+      pendingBufferStartedAt = performance.now();
+      pendingBufferMediaTime = Number(element.currentTime || 0);
+
+      pendingBufferTimer = setTimeout(() => {
+        pendingBufferTimer = 0;
+        const nowTime = Number(element.currentTime || 0);
+        const stallDurationMs = Math.round(performance.now() - pendingBufferStartedAt);
+        const advanced = nowTime - pendingBufferMediaTime > 0.04;
+        const actualPlayback = !element.paused && !element.ended;
+
+        if (actualPlayback && !advanced && (playbackHasProgressed || nowTime > 0.25)) {
+          rebufferCount += 1;
+          el("rebuffer").textContent = String(rebufferCount);
+          report(name + "_CONFIRMED", {
+            state: "play",
+            currentTime: nowTime,
+            rebufferCount,
+            stallDurationMs,
+            ...telemetrySnapshot()
+          }, "error");
+        } else {
+          report("TV_BUFFERING_IGNORED_STARTUP", {
+            state: actualPlayback ? "play" : (element.paused ? "pause" : "ready"),
+            sourceEvent: name,
+            currentTime: nowTime,
+            stallDurationMs,
+            playbackHasProgressed
+          }, "info");
+        }
+        pendingBufferEvent = null;
+      }, 600);
+    }
+
+    function notePlaybackProgress() {
+      const element = currentPlaybackElement();
+      if (Number(element.currentTime || 0) > 0.25) playbackHasProgressed = true;
+      if (pendingBufferTimer) clearPendingBuffer("playback-progress");
+    }
+
+    audio.addEventListener("waiting", () => beginBufferWatch("TV_AUDIO_WAITING"));
+    audio.addEventListener("stalled", () => beginBufferWatch("TV_AUDIO_STALLED"));
+    video.addEventListener("waiting", () => beginBufferWatch("TV_VIDEO_WAITING"));
+    video.addEventListener("stalled", () => beginBufferWatch("TV_VIDEO_STALLED"));
+    audio.addEventListener("playing", () => clearPendingBuffer("audio-playing"));
+    video.addEventListener("playing", () => clearPendingBuffer("video-playing"));
+    audio.addEventListener("timeupdate", notePlaybackProgress);
+    video.addEventListener("timeupdate", notePlaybackProgress);
     video.addEventListener("loadedmetadata", maybeReportVideoResolution);
     video.addEventListener("resize", maybeReportVideoResolution);
 
