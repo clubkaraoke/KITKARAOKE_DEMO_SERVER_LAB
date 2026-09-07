@@ -214,6 +214,13 @@ function expectedKinds(format) {
     : ["video"];
 }
 
+function normalizeCdgQuality(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["original", "sdf-lab-v2", "sdf-karaoke-pro"]);
+  return allowed.has(mode) ? mode : "original";
+}
+
+
 function mediaExtension(kind) {
   if (kind === "cdg") return ".cdg";
   if (kind === "audio") return ".m4a";
@@ -241,6 +248,7 @@ function createMediaJob(room, media, duration) {
       title: String(media.title || "").slice(0, 240),
       format: String(media.format || "").toUpperCase(),
       audio: String(media.audio || "").toUpperCase(),
+      cdgQuality: normalizeCdgQuality(media.cdgQuality),
       source: "KITKARAOKE_AGENT"
     },
     duration: [30, 45, 60].includes(Number(duration)) ? Number(duration) : 45,
@@ -315,6 +323,7 @@ function sendPreparedMedia(job) {
     mediaId: media.id,
     title: media.title,
     format: media.format,
+    cdgQuality: media.cdgQuality || null,
     duration: media.duration,
     tvCount: room.tvSocketIds.size,
     preloadPolicy: media.preloadPolicy
@@ -707,6 +716,7 @@ io.on("connection", (socket) => {
       title: job.media.title,
       format: job.media.format,
       sourceAudio: job.media.audio || null,
+      cdgQuality: job.media.cdgQuality || null,
       duration: job.duration,
       tvCount: room.tvSocketIds.size,
       agentCode: room.agentCode
