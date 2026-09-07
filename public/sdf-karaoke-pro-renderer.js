@@ -82,6 +82,7 @@
     uniform float u_radius;
     uniform float u_threshold;
     uniform vec3 u_labBackground;
+    uniform float u_transparentBackground;
     uniform float u_karaokeHD;
     uniform vec2 u_shadowOffset;
     uniform float u_shadowAlpha;
@@ -168,7 +169,16 @@
       color = mix(color, vec3(0.0), haloAlpha);
       color = mix(color, fillColor, fillAlpha);
 
-      gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+      if (u_transparentBackground > 0.5) {
+        float alpha = clamp(max(fillAlpha, max(haloAlpha, shadowOnly * u_shadowAlpha)), 0.0, 1.0);
+        vec3 transparentColor = vec3(0.0);
+        transparentColor = mix(transparentColor, vec3(0.0), shadowOnly * u_shadowAlpha);
+        transparentColor = mix(transparentColor, vec3(0.0), haloAlpha);
+        transparentColor = mix(transparentColor, fillColor, fillAlpha);
+        gl_FragColor = vec4(clamp(transparentColor, 0.0, 1.0), alpha);
+      } else {
+        gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+      }
     }
   `;
 
@@ -194,7 +204,8 @@
         shadowX: 1.25,
         shadowY: 1.00,
         shadowBlur: 0.85,
-        shadowAlpha: 0.75
+        shadowAlpha: 0.75,
+        transparentBackground: false
       }, params || {});
 
       this.rawMask = new Uint8Array(this.count);
@@ -223,7 +234,7 @@
       this.needsGradientRebuild = true;
 
       const gl = canvas.getContext('webgl', {
-        alpha: false,
+        alpha: true,
         antialias: false,
         depth: false,
         stencil: false,
@@ -275,6 +286,7 @@
         radius: gl.getUniformLocation(this.program, 'u_radius'),
         threshold: gl.getUniformLocation(this.program, 'u_threshold'),
         labBackground: gl.getUniformLocation(this.program, 'u_labBackground'),
+        transparentBackground: gl.getUniformLocation(this.program, 'u_transparentBackground'),
         karaokeHD: gl.getUniformLocation(this.program, 'u_karaokeHD'),
         shadowOffset: gl.getUniformLocation(this.program, 'u_shadowOffset'),
         shadowAlpha: gl.getUniformLocation(this.program, 'u_shadowAlpha'),
@@ -287,6 +299,7 @@
       gl.uniform1i(this.uniforms.gradientRows, 2);
       gl.uniform2f(this.uniforms.sourceSize, width, height);
       gl.uniform3f(this.uniforms.labBackground, 0.43, 0.45, 0.48);
+      gl.uniform1f(this.uniforms.transparentBackground, this.params.transparentBackground ? 1.0 : 0.0);
 
       this._resize();
       this._uploadEmptyTextures();
@@ -694,6 +707,7 @@
       gl.uniform1f(this.uniforms.expansion, Number(this.params.expansion));
       gl.uniform1f(this.uniforms.radius, Number(this.params.radius));
       gl.uniform1f(this.uniforms.threshold, Number(this.params.threshold));
+      gl.uniform1f(this.uniforms.transparentBackground, this.params.transparentBackground ? 1.0 : 0.0);
       gl.uniform1f(this.uniforms.karaokeHD, 1.0);
       gl.uniform1f(this.uniforms.proOutline, Number(this.params.proOutline));
 
