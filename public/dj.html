@@ -190,7 +190,9 @@
     function formatDiag(entry) {
       const time = new Date(entry.epochMs || Date.parse(entry.ts)).toLocaleTimeString();
       const trace = entry.traceId ? " [" + entry.traceId.slice(0, 8) + "]" : "";
-      const level = entry.level === "error" ? " ERROR" : "";
+      const level =
+        entry.level === "error" ? " ERROR" :
+        entry.level === "warn" ? " WARN" : "";
       const data = entry.data && Object.keys(entry.data).length
         ? "\n" + JSON.stringify(entry.data, null, 2)
         : "";
