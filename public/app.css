@@ -325,3 +325,24 @@ select {
 @media (max-width: 720px) {
   .quality-switch { grid-template-columns: 1fr; }
 }
+
+.tv-diag-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 14px;
+  align-items: flex-start;
+}
+.tv-diag-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  gap: 8px;
+  min-width: min(100%, 320px);
+}
+.copy-status {
+  margin-top: 10px;
+  min-height: 18px;
+}
+@media (max-width: 720px) {
+  .tv-diag-head { flex-direction: column; }
+  .tv-diag-actions { width: 100%; min-width: 0; grid-template-columns: 1fr; }
+}
