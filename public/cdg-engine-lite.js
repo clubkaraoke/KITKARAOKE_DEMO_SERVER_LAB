@@ -139,6 +139,7 @@
 
     load(bytes) {
       this.data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
+      this.resetMetrics();
       this.reset();
       this.processTo(1);
       this.render(true);
@@ -147,6 +148,13 @@
     reset() {
       this.decoder.reset();
       this.processedPacket = 0;
+    }
+
+    resetMetrics() {
+      this.renderCount = 0;
+      this.totalRenderMs = 0;
+      this.maxRenderMs = 0;
+      this.lastRenderAt = 0;
     }
 
     processTo(targetPacket) {
