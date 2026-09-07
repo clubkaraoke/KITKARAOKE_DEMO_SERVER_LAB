@@ -24,8 +24,11 @@ jobs:
       - name: Syntax check server
         run: npm run check
 
-      - name: Syntax check TV CDG engine
-        run: node --check public/cdg-engine-lite.js
+      - name: Syntax check TV CDG engines
+        run: |
+          node --check public/cdg-engine-lite.js
+          node --check public/sdf-renderer.js
+          node --check public/sdf-karaoke-pro-renderer.js
 
       - name: Syntax check Windows agent
         run: python3 -m py_compile agent/windows/agent.py
@@ -40,6 +43,11 @@ jobs:
           grep -q 'agent:prepare' agent/windows/agent.py
           grep -q 'AGENT_AUDIO_TRANSCODE_READY' agent/windows/agent.py
           grep -q 'TV_SYNC_SAMPLE' public/tv.html
+          grep -q 'SDFHDRenderer' public/tv.html
+          grep -q 'SDFKaraokeProRenderer' public/tv.html
+          grep -q 'cdgQuality' src/server-v3.js
+          grep -q 'SDF LAB V2' public/dj.html
+          grep -q 'SDF KARAOKE PRO' public/dj.html
           grep -q 'Descargar TXT' public/dj.html
 
       - name: Start server
@@ -60,6 +68,8 @@ jobs:
         run: |
           curl --fail --silent http://127.0.0.1:3000/dj | grep -q 'Diagnóstico permanente'
           curl --fail --silent http://127.0.0.1:3000/tv | grep -q 'precarga completa'
+          curl --fail --silent http://127.0.0.1:3000/tv | grep -q 'sdf-karaoke-pro-renderer.js'
+          curl --fail --silent http://127.0.0.1:3000/dj | grep -q 'SDF KARAOKE PRO'
 
       - name: Show logs on failure
         if: failure()
