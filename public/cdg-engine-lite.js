@@ -116,7 +116,7 @@
   }
 
   class CdgEngine {
-    constructor(canvas) {
+    constructor(canvas, onFrame) {
       this.canvas = canvas;
       this.ctx = canvas.getContext("2d", { alpha: false });
       this.ctx.imageSmoothingEnabled = false;
@@ -127,6 +127,7 @@
       this.data = null;
       this.processedPacket = 0;
       this.lastRenderAt = 0;
+      this.onFrame = typeof onFrame === "function" ? onFrame : null;
     }
 
     load(bytes) {
@@ -195,6 +196,7 @@
       }
 
       this.ctx.putImageData(this.imageData, 0, 0);
+      if (this.onFrame) this.onFrame(this.imageData.data, { force: Boolean(force), packet: this.processedPacket });
     }
 
     stop() {
@@ -208,8 +210,8 @@
   }
 
   window.KITKARAOKE_CDG_ENGINE = Object.freeze({
-    create(canvas) {
-      return new CdgEngine(canvas);
+    create(canvas, onFrame) {
+      return new CdgEngine(canvas, onFrame);
     },
     PACKETS_PER_SECOND
   });
