@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>KITKARAOKE · DEMO DJ LAB</title>
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <main class="shell">
+    <div class="topbar">
+      <div>
+        <div class="brand">KITKARAOKE · DEMO SERVER LAB</div>
+        <div class="muted">Panel DJ — Fase 1</div>
+      </div>
+      <div class="badge"><span id="dot" class="dot"></span><span id="connection">Conectando…</span></div>
+    </div>
+
+    <section class="hero">
+      <div class="card">
+        <div class="kicker">Sala temporal</div>
+        <h1>Control DJ</h1>
+        <p class="muted">Crea una sala y escribe el código en la TV. En esta fase probamos la comunicación en tiempo real sin exponer archivos de karaoke.</p>
+
+        <button id="createRoom">Crear sala demo</button>
+
+        <div style="height:16px"></div>
+        <div id="roomCode" class="room-code">------</div>
+
+        <div class="status-grid">
+          <div class="stat"><strong id="tvCount">0</strong><span>TV conectadas</span></div>
+          <div class="stat"><strong id="playback">IDLE</strong><span>Estado</span></div>
+          <div class="stat"><strong id="roomStatus">SIN SALA</strong><span>Sesión</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="kicker">Prueba de comandos</div>
+        <h2>Reproductor remoto</h2>
+        <div class="controls">
+          <button id="play" disabled>▶ Play</button>
+          <button id="pause" class="secondary" disabled>⏸ Pausa</button>
+          <button id="stop" class="danger" disabled>■ Stop</button>
+          <button id="load" class="secondary" disabled>Preparar demo</button>
+        </div>
+
+        <div style="height:18px"></div>
+        <h2>Diagnóstico</h2>
+        <div id="log" class="log">Esperando conexión…</div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    const socket = io();
+    let roomCode = null;
+
+    const el = (id) => document.getElementById(id);
+    const logEl = el("log");
+    const commandButtons = ["play", "pause", "stop", "load"].map(el);
+
+    function log(message, data) {
+      const line = "[" + new Date().toLocaleTimeString() + "] " + message +
+        (data ? "\n" + JSON.stringify(data, null, 2) : "");
+      logEl.textContent = line + "\n\n" + logEl.textContent;
+    }
+
+    function setCommands(enabled) {
+      commandButtons.forEach((button) => { button.disabled = !enabled; });
+    }
+
+    socket.on("connect", () => {
+      el("dot").classList.add("online");
+      el("connection").textContent = "Servidor conectado";
+      log("Socket conectado", { socketId: socket.id });
+    });
+
+    socket.on("disconnect", () => {
+      el("dot").classList.remove("online");
+      el("connection").textContent = "Servidor desconectado";
+      setCommands(false);
+      log("Socket desconectado");
+    });
+
+    socket.on("room:state", (room) => {
+      if (roomCode && room.code !== roomCode) return;
+      el("tvCount").textContent = room.tvCount;
+      el("playback").textContent = String(room.playback.state || "idle").toUpperCase();
+      el("roomStatus").textContent = room.hasDj ? "ACTIVA" : "SIN DJ";
+      setCommands(Boolean(roomCode));
+    });
+
+    socket.on("player:status", (status) => {
+      log("Estado recibido desde TV", status);
+    });
+
+    socket.on("room:expired", () => {
+      log("La sala expiró");
+      roomCode = null;
+      el("roomCode").textContent = "------";
+      setCommands(false);
+    });
+
+    el("createRoom").addEventListener("click", () => {
+      socket.emit("room:create", {}, (response) => {
+        if (!response.ok) {
+          log("No se pudo crear sala", response);
+          return;
+        }
+        roomCode = response.room.code;
+        el("roomCode").textContent = roomCode;
+        el("tvCount").textContent = response.room.tvCount;
+        el("roomStatus").textContent = "ACTIVA";
+        setCommands(true);
+        log("Sala creada", response.room);
+      });
+    });
+
+    function send(command, extra = {}) {
+      if (!roomCode) return;
+      socket.emit("player:command", { command, ...extra }, (response) => {
+        log("Comando " + command, response);
+      });
+    }
+
+    el("play").addEventListener("click", () => send("PLAY"));
+    el("pause").addEventListener("click", () => send("PAUSE"));
+    el("stop").addEventListener("click", () => send("STOP"));
+    el("load").addEventListener("click", () => send("LOAD", {
+      media: {
+        id: "LAB-DEMO-001",
+        title: "Karaoke de prueba",
+        format: "placeholder"
+      }
+    }));
+  </script>
+</body>
+</html>
