@@ -1,4 +1,4 @@
-# KITKARAOKE Agent para Windows — LAB V0.3
+# KITKARAOKE Agent para Windows — LAB V0.4
 
 Esta versión agrega preparación y transporte real de demos.
 
@@ -10,7 +10,7 @@ Esta versión agrega preparación y transporte real de demos.
 4. Recibe búsquedas del Panel DJ sin exponer rutas del disco.
 5. Cuando el DJ pulsa **Preparar demo**:
    - CDG: recorta el flujo CDG y convierte el audio a AAC 160 kbps;
-   - MP4: genera H.264/AAC 720p con `faststart`;
+   - MP4: genera H.264/AAC con `faststart` y perfiles seleccionables AUTO / 360p / 540p / 720p;
    - sube solo ese demo a una caché temporal de OVH;
    - cada reproducción usa un `traceId`.
 6. La TV descarga el demo completo y recién queda en estado **READY**.
@@ -50,4 +50,12 @@ No se envían tokens ni rutas completas del disco a los logs remotos.
 
 Windows 10/11 con Python 3.11 o superior.
 
-Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.3.zip
+Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.4.zip
+
+
+## Nuevo en V0.4
+
+- Perfil de calidad de video recibido desde el Panel DJ.
+- AUTO mantiene el flujo actual con tope 720p.
+- 360p / 540p / 720p usan objetivos de bitrate distintos para equilibrar calidad, preparación y subida.
+- Los logs del Agent ahora indican `videoQuality`, `targetHeight`, bitrate y tiempo de transcodificación.
