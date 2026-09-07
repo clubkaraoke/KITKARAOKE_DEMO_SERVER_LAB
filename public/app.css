@@ -346,3 +346,58 @@ select {
   .tv-diag-head { flex-direction: column; }
   .tv-diag-actions { width: 100%; min-width: 0; grid-template-columns: 1fr; }
 }
+
+
+/* ===== FASE 4 · fondos CDG + rendimiento ===== */
+.tv-screen {
+  isolation: isolate;
+}
+.tv-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 0;
+  background: #000;
+}
+.tv-cdg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  z-index: 2;
+  background: transparent !important;
+}
+.tv-video {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  z-index: 2;
+  background: #000;
+}
+.tv-empty { z-index: 3; }
+.tv-overlay { z-index: 4; }
+.background-switch {
+  grid-template-columns: repeat(5, minmax(0,1fr));
+}
+.control-split {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) minmax(0,1fr);
+  gap: 16px;
+}
+.control-split > div { min-width: 0; }
+.tv-perf-grid {
+  grid-template-columns: repeat(6, minmax(0,1fr));
+}
+@media (max-width: 1050px) {
+  .tv-perf-grid { grid-template-columns: repeat(3, minmax(0,1fr)); }
+  .background-switch { grid-template-columns: repeat(3, minmax(0,1fr)); }
+}
+@media (max-width: 720px) {
+  .control-split { grid-template-columns: 1fr; }
+  .background-switch,
+  .tv-perf-grid { grid-template-columns: 1fr; }
+}
