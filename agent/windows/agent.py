@@ -161,6 +161,9 @@ class AgentApp:
         self.stop_event = threading.Event()
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.ffmpeg_path = self.detect_ffmpeg()
+        self.prepare_lock = threading.Lock()
+        self.cancelled_traces: set[str] = set()
+        self.latest_prepare_trace_id = ""
 
         self.server_var = tk.StringVar(value=self.config.get("server", DEFAULT_SERVER))
         self.folder_var = tk.StringVar(value=self.config.get("folder", ""))
@@ -546,18 +549,43 @@ class AgentApp:
         except Exception:
             pass
 
-    def run_ffmpeg(self, args: list[str]) -> None:
+    def is_cancelled(self, trace_id: str) -> bool:
+        return bool(trace_id) and (
+            trace_id in self.cancelled_traces
+            or (self.latest_prepare_trace_id and trace_id != self.latest_prepare_trace_id)
+        )
+
+    def ensure_not_cancelled(self, trace_id: str) -> None:
+        if self.is_cancelled(trace_id):
+            raise RuntimeError("PREPARE_SUPERSEDED")
+
+    def run_ffmpeg(self, args: list[str], trace_id: str = "") -> None:
         if not self.ffmpeg_path:
             raise RuntimeError("FFmpeg no está disponible")
         command = [self.ffmpeg_path, "-hide_banner", "-loglevel", "error", "-y"] + args
-        completed = subprocess.run(
+        process = subprocess.Popen(
             command,
-            capture_output=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
             text=True,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
-        if completed.returncode != 0:
-            detail = (completed.stderr or completed.stdout or "FFmpeg error").strip()
+        while process.poll() is None:
+            if trace_id and self.is_cancelled(trace_id):
+                try:
+                    process.terminate()
+                    process.wait(timeout=3)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                raise RuntimeError("PREPARE_SUPERSEDED")
+            time.sleep(0.08)
+
+        stdout, stderr = process.communicate()
+        if process.returncode != 0:
+            detail = (stderr or stdout or "FFmpeg error").strip()
             raise RuntimeError(detail[-600:])
 
     def prepare_cdg(
@@ -610,7 +638,8 @@ class AgentApp:
                 "-b:a", "160k",
                 "-movflags", "+faststart",
                 str(audio_out),
-            ]
+            ],
+            trace_id=trace_id,
         )
         self.emit_diag(
             trace_id,
@@ -652,7 +681,8 @@ class AgentApp:
                 "-b:a", "160k",
                 "-movflags", "+faststart",
                 str(video_out),
-            ]
+            ],
+            trace_id=trace_id,
         )
         self.emit_diag(
             trace_id,
@@ -739,6 +769,7 @@ class AgentApp:
         try:
             if not self.ffmpeg_path:
                 raise RuntimeError("FFmpeg no disponible en el Agent")
+            self.ensure_not_cancelled(trace_id)
 
             self.ui(self.prepare_var.set, "Preparando demo…")
             self.emit_diag(
@@ -780,9 +811,11 @@ class AgentApp:
                         item, duration, workdir, trace_id, room_code
                     )
 
+                self.ensure_not_cancelled(trace_id)
                 total_bytes = 0
                 upload_ms = 0
                 for kind, file_path in parts.items():
+                    self.ensure_not_cancelled(trace_id)
                     url = str(uploads.get(kind) or "")
                     if not url:
                         raise RuntimeError(f"Falta URL temporal para {kind}")
@@ -817,6 +850,16 @@ class AgentApp:
             self.ui(self.prepare_var.set, "Demo listo · enviado a OVH")
         except Exception as exc:
             error_text = str(exc)
+            if error_text == "PREPARE_SUPERSEDED":
+                self.emit_diag(
+                    trace_id,
+                    "AGENT_PREPARE_CANCELLED",
+                    {"reason": "replaced-by-newer-request"},
+                    room_code=room_code,
+                )
+                self.ui(self.prepare_var.set, "Solicitud anterior cancelada")
+                return
+
             self.emit_diag(
                 trace_id,
                 "AGENT_PREPARE_ERROR",
@@ -885,11 +928,37 @@ class AgentApp:
 
         @self.sio.on("agent:prepare")
         def on_prepare(payload):
-            threading.Thread(
-                target=self.prepare_media,
-                args=(payload or {},),
-                daemon=True,
-            ).start()
+            data = payload or {}
+            trace_id = str(data.get("traceId") or "")
+            self.latest_prepare_trace_id = trace_id
+            self.cancelled_traces.discard(trace_id)
+
+            def worker():
+                with self.prepare_lock:
+                    if self.is_cancelled(trace_id):
+                        self.emit_diag(
+                            trace_id,
+                            "AGENT_PREPARE_CANCELLED",
+                            {"reason": "stale-before-start"},
+                            room_code=str(data.get("roomCode") or ""),
+                        )
+                        return
+                    self.prepare_media(data)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        @self.sio.on("agent:prepare:cancel")
+        def on_prepare_cancel(payload):
+            data = payload or {}
+            trace_id = str(data.get("traceId") or "")
+            if trace_id:
+                self.cancelled_traces.add(trace_id)
+                self.emit_diag(
+                    trace_id,
+                    "AGENT_CANCEL_REQUEST_RECEIVED",
+                    {"replacedByTraceId": str(data.get("replacedByTraceId") or "")},
+                    room_code=str(data.get("roomCode") or ""),
+                )
 
     def register_agent(self) -> None:
         if not self.connected:
