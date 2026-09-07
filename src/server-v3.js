@@ -562,12 +562,30 @@ io.on("connection", (socket) => {
     ack({ ok: true, room: publicRoomState(room) });
 
     if (role === "tv" && room.playback.media && room.playback.media.urls) {
-      socket.emit("player:command", {
-        command: "LOAD",
-        media: room.playback.media,
-        traceId: room.playback.traceId,
-        sentAt: Date.now()
-      });
+      const reconnectPreservesMedia = Boolean(
+        payload.reconnect &&
+        payload.mediaReady &&
+        payload.currentTraceId &&
+        String(payload.currentTraceId) === String(room.playback.traceId || "")
+      );
+
+      if (reconnectPreservesMedia) {
+        room.readyTvSocketIds.add(socket.id);
+        diag(code, "TV", "TV_REJOIN_MEDIA_PRESERVED", {
+          socketId: socket.id,
+          traceId: room.playback.traceId,
+          state: room.playback.state,
+          transportMode: String(payload.transportMode || "HTTP_PRELOAD").slice(0, 40)
+        }, room.playback.traceId);
+        emitRoomState(room);
+      } else {
+        socket.emit("player:command", {
+          command: "LOAD",
+          media: room.playback.media,
+          traceId: room.playback.traceId,
+          sentAt: Date.now()
+        });
+      }
     }
   });
 
