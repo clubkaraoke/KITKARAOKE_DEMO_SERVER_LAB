@@ -267,7 +267,16 @@
       rendererMetrics.windowFrames = 0;
       rendererMetrics.windowAt = performance.now();
 
-      resetPlaybackMetrics();
+      frameMetrics.presentedFrames = 0;
+      frameMetrics.decodedFrames = 0;
+      frameMetrics.droppedFrames = 0;
+      frameMetrics.fps = 0;
+      frameMetrics.freezes = 0;
+      frameMetrics.longFrameGaps = 0;
+      frameMetrics.lastFrameGapMs = 0;
+      frameMetrics.maxFrameGapMs = 0;
+      frameMetrics.windowFrames = 0;
+      frameMetrics.windowAt = performance.now();
 
       backgroundMetrics.fps = 0;
       backgroundMetrics.frames = 0;
@@ -959,17 +968,7 @@
       readySeq = 0;
       cdgMode = String(media.format).toUpperCase() === "CDG";
       rebufferCount = 0;
-      playbackHasProgressed = false;
-      frameMetrics.presentedFrames = 0;
-      frameMetrics.decodedFrames = 0;
-      frameMetrics.droppedFrames = 0;
-      frameMetrics.fps = 0;
-      frameMetrics.freezes = 0;
-      frameMetrics.longFrameGaps = 0;
-      frameMetrics.lastFrameGapMs = 0;
-      frameMetrics.maxFrameGapMs = 0;
-      frameMetrics.windowFrames = 0;
-      frameMetrics.windowAt = performance.now();
+      resetPlaybackMetrics();
 
       if (cdgMode) {
         applyBackground(media.cdgBackground || "black", media.backgroundQuality || "normal", "media-load");
