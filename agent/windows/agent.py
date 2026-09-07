@@ -20,7 +20,7 @@ import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.4.0"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
@@ -206,6 +206,8 @@ class AgentApp:
             "ffmpeg": bool(self.ffmpeg_path),
             "cdgAacDemo": bool(self.ffmpeg_path),
             "mp4H264Demo": bool(self.ffmpeg_path),
+            "videoQualities": ["auto", "360", "540", "720"],
+            "transportMode": "HTTP_PRELOAD",
             "fullPreloadRecommended": True,
             "version": APP_VERSION,
         }
@@ -624,6 +626,7 @@ class AgentApp:
                 "bytes": cdg_out.stat().st_size,
                 "elapsedMs": int((time.perf_counter() - started) * 1000),
                 "duration": duration,
+                "videoQuality": str(media.get("videoQuality") or "auto") if item["format"] != "CDG" else None,
             },
             room_code=room_code,
         )
@@ -661,36 +664,59 @@ class AgentApp:
         workdir: Path,
         trace_id: str,
         room_code: str,
+        video_quality: str = "auto",
     ) -> dict[str, Path]:
         source = Path(item["_path"])
         if not source.exists():
             raise FileNotFoundError("El video ya no existe en la carpeta autorizada")
 
+        requested = str(video_quality or "auto").strip().lower()
+        profiles = {
+            "360": {"height": 360, "crf": "24", "video_bitrate": "750k", "maxrate": "900k", "bufsize": "1800k", "audio_bitrate": "128k"},
+            "540": {"height": 540, "crf": "23", "video_bitrate": "1500k", "maxrate": "1800k", "bufsize": "3600k", "audio_bitrate": "160k"},
+            "720": {"height": 720, "crf": "22", "video_bitrate": "2800k", "maxrate": "3500k", "bufsize": "7000k", "audio_bitrate": "160k"},
+            "auto": {"height": 720, "crf": "23", "video_bitrate": None, "maxrate": None, "bufsize": None, "audio_bitrate": "160k"},
+        }
+        if requested not in profiles:
+            requested = "auto"
+        profile = profiles[requested]
+
         video_out = workdir / "demo.mp4"
+        args = [
+            "-i", str(source),
+            "-t", str(duration),
+            "-vf", f"scale=-2:{profile['height']}:force_original_aspect_ratio=decrease",
+            "-c:v", "libx264",
+            "-preset", "veryfast",
+            "-crf", profile["crf"],
+            "-pix_fmt", "yuv420p",
+        ]
+        if profile["video_bitrate"]:
+            args += [
+                "-b:v", profile["video_bitrate"],
+                "-maxrate", profile["maxrate"],
+                "-bufsize", profile["bufsize"],
+            ]
+        args += [
+            "-c:a", "aac",
+            "-b:a", profile["audio_bitrate"],
+            "-movflags", "+faststart",
+            str(video_out),
+        ]
+
         started = time.perf_counter()
-        self.run_ffmpeg(
-            [
-                "-i", str(source),
-                "-t", str(duration),
-                "-vf", "scale=-2:720:force_original_aspect_ratio=decrease",
-                "-c:v", "libx264",
-                "-preset", "veryfast",
-                "-crf", "23",
-                "-pix_fmt", "yuv420p",
-                "-c:a", "aac",
-                "-b:a", "160k",
-                "-movflags", "+faststart",
-                str(video_out),
-            ],
-            trace_id=trace_id,
-        )
+        self.run_ffmpeg(args, trace_id=trace_id)
         self.emit_diag(
             trace_id,
             "AGENT_MP4_TRANSCODE_READY",
             {
                 "videoCodec": "H264",
                 "audioCodec": "AAC",
-                "maxHeight": 720,
+                "videoQuality": requested,
+                "targetHeight": profile["height"],
+                "crf": int(profile["crf"]),
+                "videoBitrate": profile["video_bitrate"] or "CRF_AUTO",
+                "audioBitrate": profile["audio_bitrate"],
                 "faststart": True,
                 "bytes": video_out.stat().st_size,
                 "elapsedMs": int((time.perf_counter() - started) * 1000),
@@ -780,6 +806,7 @@ class AgentApp:
                     "title": str(media.get("title") or ""),
                     "format": str(media.get("format") or ""),
                     "duration": duration,
+                    "videoQuality": str(media.get("videoQuality") or "auto"),
                 },
                 room_code=room_code,
             )
@@ -808,7 +835,12 @@ class AgentApp:
                     )
                 else:
                     parts = self.prepare_video(
-                        item, duration, workdir, trace_id, room_code
+                        item,
+                        duration,
+                        workdir,
+                        trace_id,
+                        room_code,
+                        str(media.get("videoQuality") or "auto"),
                     )
 
                 self.ensure_not_cancelled(trace_id)
