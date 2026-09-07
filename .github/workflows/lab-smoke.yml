@@ -8,7 +8,7 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,15 +24,23 @@ jobs:
       - name: Syntax check server
         run: npm run check
 
+      - name: Syntax check TV CDG engine
+        run: node --check public/cdg-engine-lite.js
+
       - name: Syntax check Windows agent
         run: python3 -m py_compile agent/windows/agent.py
 
-      - name: Verify agent safety contract
+      - name: Verify phase 3 contracts
         run: |
-          grep -q 'agent:register' src/server.js
-          grep -q 'agent:search' src/server.js
-          grep -q 'NO se envían a OVH' agent/windows/agent.py
-          grep -q 'CDG_EXT' agent/windows/agent.py
+          grep -q 'media:prepare' src/server-v3.js
+          grep -q 'OVH_UPLOAD_COMPLETE' src/server-v3.js
+          grep -q 'diagnostics:get' src/server-v3.js
+          grep -q 'Accept-Ranges' src/server-v3.js
+          grep -q 'FULL_BEFORE_PLAY' src/server-v3.js
+          grep -q 'agent:prepare' agent/windows/agent.py
+          grep -q 'AGENT_AUDIO_TRANSCODE_READY' agent/windows/agent.py
+          grep -q 'TV_SYNC_SAMPLE' public/tv.html
+          grep -q 'Descargar TXT' public/dj.html
 
       - name: Start server
         run: |
@@ -40,12 +48,18 @@ jobs:
           echo $! > server.pid
           sleep 3
 
-      - name: Health check phase 2
+      - name: Health check phase 3
         run: |
           curl --fail --silent http://127.0.0.1:3000/health | tee /tmp/health.json
-          grep -q '"phase":2' /tmp/health.json
+          grep -q '"phase":3' /tmp/health.json
           grep -q '"agentsOnline":0' /tmp/health.json
+          grep -q '"mediaJobs":0' /tmp/health.json
           echo
+
+      - name: Verify pages
+        run: |
+          curl --fail --silent http://127.0.0.1:3000/dj | grep -q 'Diagnóstico permanente'
+          curl --fail --silent http://127.0.0.1:3000/tv | grep -q 'precarga completa'
 
       - name: Show logs on failure
         if: failure()
