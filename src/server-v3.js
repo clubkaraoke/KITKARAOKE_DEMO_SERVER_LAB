@@ -368,7 +368,7 @@ app.get("/health", (_req, res) => {
   res.json({
     ok: true,
     service: "kitkaraoke-demo-server-lab",
-    phase: 3,
+    phase: 4,
     rooms: rooms.size,
     agentsOnline: agents.size,
     mediaJobs: mediaJobs.size,
@@ -379,7 +379,7 @@ app.get("/health", (_req, res) => {
 app.get("/api/status", (_req, res) => {
   res.json({
     ok: true,
-    phase: 3,
+    phase: 4,
     rooms: Array.from(rooms.values()).map(publicRoomState),
     agentsOnline: Array.from(agents.values()).map((agent) => ({
       code: agent.code,
@@ -928,11 +928,10 @@ io.on("connection", (socket) => {
     };
     room.settings = next;
 
-    if (room.playback.media) {
+    if (room.playback.media && String(room.playback.media.format || "").toUpperCase() === "CDG") {
       room.playback.media.cdgQuality = next.cdgQuality;
       room.playback.media.cdgBackground = next.cdgBackground;
       room.playback.media.backgroundQuality = next.backgroundQuality;
-      room.playback.media.videoQuality = next.videoQuality;
     }
 
     touch(room);
@@ -1145,7 +1144,7 @@ setInterval(async () => {
 server.listen(PORT, "0.0.0.0", () => {
   log("server_started", {
     port: PORT,
-    phase: 3,
+    phase: 4,
     mediaDir: MEDIA_DIR,
     diagnosticsDir: DIAG_DIR,
     preloadPolicy: "FULL_BEFORE_PLAY"
