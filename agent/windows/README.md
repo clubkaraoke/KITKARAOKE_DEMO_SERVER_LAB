@@ -49,3 +49,5 @@ No se envían tokens ni rutas completas del disco a los logs remotos.
 ## Requisito
 
 Windows 10/11 con Python 3.11 o superior.
+
+Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.3.zip
