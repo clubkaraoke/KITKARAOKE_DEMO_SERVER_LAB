@@ -1117,16 +1117,19 @@
       const nextQuality = normalizeQuality(settings.cdgQuality || requestedCdgQuality);
       const nextBg = normalizeBg(settings.cdgBackground || backgroundMode);
       const nextBgQuality = normalizeBgQuality(settings.backgroundQuality || requestedBackgroundQuality);
-      if (cdgMode || currentMedia?.format === "CDG") {
-        applyBackground(nextBg, nextBgQuality, source || "live-settings");
-        activateCdgQuality(nextQuality, source || "live-settings");
-        if (mediaReady) {
-          cdgEngine.render(true);
-          setVisible("cdg");
+      if (cdgMode || String(currentMedia?.format || "").toUpperCase() === "CDG") {
+        const visualChanged =
+          nextQuality !== requestedCdgQuality ||
+          nextBg !== backgroundMode ||
+          nextBgQuality !== requestedBackgroundQuality;
+        if (visualChanged) {
+          applyBackground(nextBg, nextBgQuality, source || "live-settings");
+          activateCdgQuality(nextQuality, source || "live-settings");
+          if (mediaReady) {
+            cdgEngine.render(true);
+            setVisible("cdg");
+          }
         }
-      }
-      if (currentMedia && String(currentMedia.format).toUpperCase() !== "CDG") {
-        currentMedia.videoQuality = normalizeVideoQuality(settings.videoQuality || currentMedia.videoQuality || "auto");
       }
     }
 
