@@ -78,6 +78,7 @@
     uniform float u_radius;
     uniform float u_threshold;
     uniform vec3 u_labBackground;
+    uniform float u_transparentBackground;
 
     varying vec2 v_uv;
 
@@ -124,7 +125,15 @@
       color = mix(color, vec3(0.0), haloAlpha);
       color = mix(color, fillColor, fillAlpha);
 
-      gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+      if (u_transparentBackground > 0.5) {
+        float alpha = clamp(max(haloAlpha, fillAlpha), 0.0, 1.0);
+        vec3 transparentColor = vec3(0.0);
+        transparentColor = mix(transparentColor, vec3(0.0), haloAlpha);
+        transparentColor = mix(transparentColor, fillColor, fillAlpha);
+        gl_FragColor = vec4(clamp(transparentColor, 0.0, 1.0), alpha);
+      } else {
+        gl_FragColor = vec4(clamp(color, 0.0, 1.0), 1.0);
+      }
     }
   `;
 
@@ -143,7 +152,8 @@
         threshold: 0.08,
         preSmooth: 1,
         expansion: 0.0,
-        scale: 5
+        scale: 5,
+        transparentBackground: false
       }, params || {});
 
       this.rawMask = new Uint8Array(this.count);
@@ -168,7 +178,7 @@
       this.needsEncode = true;
 
       const gl = canvas.getContext('webgl', {
-        alpha: false,
+        alpha: true,
         antialias: false,
         depth: false,
         stencil: false,
@@ -217,13 +227,15 @@
         expansion: gl.getUniformLocation(this.program, 'u_expansion'),
         radius: gl.getUniformLocation(this.program, 'u_radius'),
         threshold: gl.getUniformLocation(this.program, 'u_threshold'),
-        labBackground: gl.getUniformLocation(this.program, 'u_labBackground')
+        labBackground: gl.getUniformLocation(this.program, 'u_labBackground'),
+        transparentBackground: gl.getUniformLocation(this.program, 'u_transparentBackground')
       };
 
       gl.uniform1i(this.uniforms.source, 0);
       gl.uniform1i(this.uniforms.sdf, 1);
       gl.uniform2f(this.uniforms.sourceSize, width, height);
       gl.uniform3f(this.uniforms.labBackground, 0.43, 0.45, 0.48);
+      gl.uniform1f(this.uniforms.transparentBackground, this.params.transparentBackground ? 1.0 : 0.0);
 
       this._resize();
       this._uploadEmptyTextures();
@@ -483,6 +495,7 @@
       gl.uniform1f(this.uniforms.expansion, Number(this.params.expansion));
       gl.uniform1f(this.uniforms.radius, Number(this.params.radius));
       gl.uniform1f(this.uniforms.threshold, Number(this.params.threshold));
+      gl.uniform1f(this.uniforms.transparentBackground, this.params.transparentBackground ? 1.0 : 0.0);
 
       gl.viewport(0, 0, this.canvas.width, this.canvas.height);
       gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
