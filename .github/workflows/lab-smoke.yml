@@ -29,6 +29,16 @@ jobs:
           node --check public/cdg-engine-lite.js
           node --check public/sdf-renderer.js
           node --check public/sdf-karaoke-pro-renderer.js
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          for source, out in [('public/tv.html','/tmp/tv-inline.js'),('public/dj.html','/tmp/dj-inline.js')]:
+              html=Path(source).read_text(encoding='utf-8')
+              scripts=re.findall(r'<script(?:\s[^>]*)?>(.*?)</script>',html,re.S|re.I)
+              Path(out).write_text('\n'.join(scripts),encoding='utf-8')
+          PY
+          node --check /tmp/tv-inline.js
+          node --check /tmp/dj-inline.js
 
       - name: Syntax check Windows agent
         run: python3 -m py_compile agent/windows/agent.py
