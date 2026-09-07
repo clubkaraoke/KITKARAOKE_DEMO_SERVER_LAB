@@ -1,0 +1,40 @@
+name: LAB smoke test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install
+        run: npm install
+
+      - name: Syntax check
+        run: npm run check
+
+      - name: Start server
+        run: |
+          npm start > server.log 2>&1 &
+          echo $! > server.pid
+          sleep 3
+
+      - name: Health check
+        run: |
+          curl --fail --silent http://127.0.0.1:3000/health
+          echo
+
+      - name: Show logs on failure
+        if: failure()
+        run: cat server.log || true
