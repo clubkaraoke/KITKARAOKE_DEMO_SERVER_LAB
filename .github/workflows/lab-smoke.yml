@@ -65,8 +65,19 @@ jobs:
           grep -q 'TV_PRELOAD_RETRY' public/tv.html
           grep -q 'TV_PLAY_ABORTED_BY_LOAD' public/tv.html
           grep -q 'TV_VIDEO_FREEZE' public/tv.html
-          grep -q 'LAB-TV-4.1' public/tv.html
+          grep -q 'LAB-TV-4.2' public/tv.html
           grep -q 'SDF_FRAME_MIN_MS = 25' public/tv.html
+          grep -q 'TV_LOAD_HANDLER_ERROR' public/tv.html
+          grep -q 'TV_JS_ERROR' public/tv.html
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('public/tv.html').read_text(encoding='utf-8')
+          start=s.index('function resetBackgroundPerformanceMetrics()')
+          end=s.index('function resetPlaybackMetrics()', start)
+          body=s[start:end]
+          assert body.count('resetBackgroundPerformanceMetrics()') == 1, 'recursive background metrics reset detected'
+          assert 'backgroundMetrics.frames = 0' in body
+          PY
           grep -q 'TV_BUFFERING_IGNORED_STARTUP' public/tv.html
           grep -q 'TV_AUDIO_WAITING.*_CONFIRMED\|name + "_CONFIRMED"' public/tv.html
           grep -q 'displayFps' public/tv.html
