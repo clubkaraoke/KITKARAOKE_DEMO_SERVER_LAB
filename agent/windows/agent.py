@@ -39,6 +39,8 @@ def app_data_dir() -> Path:
 
 
 CONFIG_PATH = app_data_dir() / "config.json"
+LOG_DIR = app_data_dir() / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def normalize_text(value: str) -> str:
@@ -347,7 +349,14 @@ class AgentApp:
 
     def add_log(self, message: str) -> None:
         stamp = time.strftime("%H:%M:%S")
-        self.log_queue.put(f"[{stamp}] {message}")
+        line = f"[{stamp}] {message}"
+        self.log_queue.put(line)
+        try:
+            log_file = LOG_DIR / ("agent-" + time.strftime("%Y%m%d") + ".log")
+            with log_file.open("a", encoding="utf-8") as handle:
+                handle.write(line + "\n")
+        except Exception:
+            pass
 
     def flush_logs(self) -> None:
         lines = []
