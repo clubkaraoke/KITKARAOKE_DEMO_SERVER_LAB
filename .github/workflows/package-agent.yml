@@ -1,0 +1,40 @@
+name: Package Windows Agent
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "agent/windows/**"
+      - ".github/workflows/package-agent.yml"
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate agent
+        run: |
+          python3 -m py_compile agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.3.0"' agent/windows/agent.py
+          grep -q 'AGENT_PREPARE_COMPLETE' agent/windows/agent.py
+
+      - name: Build ZIP
+        run: |
+          mkdir -p dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.3
+          cp agent/windows/agent.py dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.3/
+          cp agent/windows/requirements.txt dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.3/
+          cp agent/windows/INICIAR_KITKARAOKE_AGENT.bat dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.3/
+          cp agent/windows/README.md dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.3/
+          cd dist
+          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.3.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.3
+
+      - name: Upload ZIP artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.3
+          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.3.zip
+          if-no-files-found: error
+          retention-days: 14
