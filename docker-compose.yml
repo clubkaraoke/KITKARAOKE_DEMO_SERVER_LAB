@@ -9,11 +9,13 @@ services:
       SESSION_TTL_MINUTES: 120
       MEDIA_TTL_MINUTES: 20
       MEDIA_DIR: /data/media
+      DIAG_DIR: /data/diagnostics
       MAX_UPLOAD_MB: 80
     ports:
       - "127.0.0.1:${DEMO_HOST_PORT:-8795}:3000"
     volumes:
       - /var/lib/kitkaraoke-demo-server-lab/media:/data/media
+      - /var/lib/kitkaraoke-demo-server-lab/diagnostics:/data/diagnostics
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health"]
       interval: 15s
