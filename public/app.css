@@ -184,3 +184,110 @@ input {
   .result { grid-template-columns: 1fr; }
   .result button { width: 100%; }
 }
+
+select {
+  width: 100%;
+  min-height: 48px;
+  border-radius: 13px;
+  border: 1px solid rgba(255,255,255,.12);
+  background: #0c111b;
+  color: #fff;
+  padding: 0 14px;
+  font: inherit;
+}
+.stage-box {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+  padding: 14px;
+  background: #0c111b;
+  border-radius: 14px;
+}
+.trace-line {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #8795aa;
+  overflow-wrap: anywhere;
+}
+.trace-line code { color: #c7d2e6; }
+.diag-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 18px;
+  align-items: flex-start;
+}
+.diag-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(120px, 1fr));
+  gap: 8px;
+  min-width: min(100%, 480px);
+}
+.diag-summary {
+  display: flex;
+  gap: 18px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #9da9bd;
+}
+.diag-log { height: 520px; }
+.tv-body { background: #030407; }
+.tv-shell { width: min(1440px, calc(100% - 24px)); padding-top: 18px; }
+.tv-layout { display: grid; grid-template-columns: 340px minmax(0,1fr); gap: 16px; }
+.tv-pair-card { align-self: start; }
+.tv-screen {
+  position: relative;
+  min-height: min(72vh, 820px);
+  overflow: hidden;
+  padding: 0;
+  background: #000;
+}
+.tv-cdg, .tv-video {
+  width: 100%;
+  height: 100%;
+  max-height: 82vh;
+  object-fit: contain;
+  image-rendering: pixelated;
+  background: #000;
+}
+.tv-cdg { aspect-ratio: 4 / 3; }
+.tv-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  text-align: center;
+  padding: 32px;
+}
+.tv-overlay {
+  position: absolute;
+  left: 14px;
+  right: 14px;
+  bottom: 14px;
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(0,0,0,.55);
+  backdrop-filter: blur(8px);
+  font-size: 12px;
+  pointer-events: none;
+}
+.tv-overlay strong { letter-spacing: .12em; }
+.preload-meter {
+  margin-top: 10px;
+  padding: 10px 14px;
+  border: 1px solid rgba(255,255,255,.1);
+  border-radius: 999px;
+  color: #aab6c9;
+}
+.tv-diag-card { margin-top: 16px; }
+.compact-log { height: 180px; margin-top: 12px; }
+.hidden { display: none !important; }
+@media (max-width: 900px) {
+  .diag-head { flex-direction: column; }
+  .diag-actions { min-width: 0; width: 100%; grid-template-columns: 1fr; }
+  .tv-layout { grid-template-columns: 1fr; }
+  .tv-screen { min-height: 56vh; }
+}
