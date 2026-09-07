@@ -716,7 +716,13 @@ io.on("connection", (socket) => {
       ? String(payload.origin).replace(/\/$/, "")
       : "https://demodj.kitkaraoke.com";
 
-    if (previousTraceId && previousTraceId !== job.traceId) {
+    const previousJobForCancel = previousTraceId ? mediaJobs.get(previousTraceId) : null;
+    if (
+      previousTraceId &&
+      previousTraceId !== job.traceId &&
+      previousJobForCancel &&
+      ["preparing", "uploading"].includes(previousJobForCancel.status)
+    ) {
       io.to(agent.socketId).emit("agent:prepare:cancel", {
         traceId: previousTraceId,
         roomCode: room.code,
