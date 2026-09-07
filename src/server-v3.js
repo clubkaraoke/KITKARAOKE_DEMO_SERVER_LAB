@@ -136,6 +136,12 @@ function newRoom(code, djSocketId) {
     readyTvSocketIds: new Set(),
     agentCode: null,
     activeTraceId: null,
+    settings: {
+      cdgQuality: "original",
+      cdgBackground: "black",
+      backgroundQuality: "normal",
+      videoQuality: "auto"
+    },
     playback: {
       state: "idle",
       media: null,
@@ -173,6 +179,7 @@ function publicRoomState(room) {
     hasDj: Boolean(room.djSocketId),
     agent: publicAgentState(room.agentCode),
     activeTraceId: room.activeTraceId || null,
+    settings: room.settings,
     playback: room.playback
   };
 }
@@ -220,6 +227,24 @@ function normalizeCdgQuality(value) {
   return allowed.has(mode) ? mode : "original";
 }
 
+function normalizeCdgBackground(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["black", "waves", "glow", "gradient", "particles"]);
+  return allowed.has(mode) ? mode : "black";
+}
+
+function normalizeBackgroundQuality(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["light", "normal", "premium"]);
+  return allowed.has(mode) ? mode : "normal";
+}
+
+function normalizeVideoQuality(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["auto", "360", "540", "720"]);
+  return allowed.has(mode) ? mode : "auto";
+}
+
 
 function mediaExtension(kind) {
   if (kind === "cdg") return ".cdg";
@@ -248,7 +273,10 @@ function createMediaJob(room, media, duration) {
       title: String(media.title || "").slice(0, 240),
       format: String(media.format || "").toUpperCase(),
       audio: String(media.audio || "").toUpperCase(),
-      cdgQuality: normalizeCdgQuality(media.cdgQuality),
+      cdgQuality: normalizeCdgQuality(media.cdgQuality || room.settings.cdgQuality),
+      cdgBackground: normalizeCdgBackground(media.cdgBackground || room.settings.cdgBackground),
+      backgroundQuality: normalizeBackgroundQuality(media.backgroundQuality || room.settings.backgroundQuality),
+      videoQuality: normalizeVideoQuality(media.videoQuality || room.settings.videoQuality),
       source: "KITKARAOKE_AGENT"
     },
     duration: [30, 45, 60].includes(Number(duration)) ? Number(duration) : 45,
@@ -324,6 +352,10 @@ function sendPreparedMedia(job) {
     title: media.title,
     format: media.format,
     cdgQuality: media.cdgQuality || null,
+    cdgBackground: media.cdgBackground || null,
+    backgroundQuality: media.backgroundQuality || null,
+    videoQuality: media.videoQuality || null,
+    transportMode: "HTTP_PRELOAD",
     duration: media.duration,
     tvCount: room.tvSocketIds.size,
     preloadPolicy: media.preloadPolicy
@@ -520,7 +552,10 @@ io.on("connection", (socket) => {
 
     diag(code, role.toUpperCase(), "ROOM_JOINED", {
       socketId: socket.id,
-      tvCount: room.tvSocketIds.size
+      tvCount: room.tvSocketIds.size,
+      transportMode: String(payload.transportMode || "SOCKET_IO").slice(0, 40),
+      reconnect: Boolean(payload.reconnect),
+      clientVersion: String(payload.clientVersion || "").slice(0, 40)
     }, room.playback.traceId);
 
     emitRoomState(room);
@@ -700,6 +735,13 @@ io.on("connection", (socket) => {
     }
 
     const job = createMediaJob(room, media, payload.duration);
+    if (job.media.format === "CDG") {
+      room.settings.cdgQuality = job.media.cdgQuality;
+      room.settings.cdgBackground = job.media.cdgBackground;
+      room.settings.backgroundQuality = job.media.backgroundQuality;
+    } else {
+      room.settings.videoQuality = job.media.videoQuality;
+    }
     room.activeTraceId = job.traceId;
     room.readyTvSocketIds.clear();
     room.playback = {
@@ -717,6 +759,10 @@ io.on("connection", (socket) => {
       format: job.media.format,
       sourceAudio: job.media.audio || null,
       cdgQuality: job.media.cdgQuality || null,
+      cdgBackground: job.media.cdgBackground || null,
+      backgroundQuality: job.media.backgroundQuality || null,
+      videoQuality: job.media.videoQuality || null,
+      transportMode: "HTTP_PRELOAD",
       duration: job.duration,
       tvCount: room.tvSocketIds.size,
       agentCode: room.agentCode
@@ -841,6 +887,50 @@ io.on("connection", (socket) => {
     ack({ ok: true });
   });
 
+  socket.on("transport:ping", (payload = {}, ack = () => {}) => {
+    const room = rooms.get(socket.data.roomCode);
+    ack({
+      ok: true,
+      serverAt: Date.now(),
+      clientAt: Number(payload.clientAt || 0),
+      roomCode: room ? room.code : null,
+      role: socket.data.role || null
+    });
+  });
+
+  socket.on("player:settings", (payload = {}, ack = () => {}) => {
+    const room = rooms.get(socket.data.roomCode);
+    if (!room || socket.data.role !== "dj") return ack({ ok: false, error: "DJ_ROOM_REQUIRED" });
+
+    const next = {
+      cdgQuality: payload.cdgQuality == null ? room.settings.cdgQuality : normalizeCdgQuality(payload.cdgQuality),
+      cdgBackground: payload.cdgBackground == null ? room.settings.cdgBackground : normalizeCdgBackground(payload.cdgBackground),
+      backgroundQuality: payload.backgroundQuality == null ? room.settings.backgroundQuality : normalizeBackgroundQuality(payload.backgroundQuality),
+      videoQuality: payload.videoQuality == null ? room.settings.videoQuality : normalizeVideoQuality(payload.videoQuality)
+    };
+    room.settings = next;
+
+    if (room.playback.media) {
+      room.playback.media.cdgQuality = next.cdgQuality;
+      room.playback.media.cdgBackground = next.cdgBackground;
+      room.playback.media.backgroundQuality = next.backgroundQuality;
+      room.playback.media.videoQuality = next.videoQuality;
+    }
+
+    touch(room);
+    io.to(room.code).emit("player:settings", {
+      settings: next,
+      traceId: room.playback.traceId || null,
+      sentAt: Date.now()
+    });
+    emitRoomState(room);
+    diag(room.code, "DJ", "PLAYER_SETTINGS_CHANGED", {
+      ...next,
+      tvCount: room.tvSocketIds.size
+    }, room.playback.traceId);
+    ack({ ok: true, settings: next, room: publicRoomState(room) });
+  });
+
   socket.on("player:command", (payload = {}, ack = () => {}) => {
     const room = rooms.get(socket.data.roomCode);
     if (!room || socket.data.role !== "dj") return ack({ ok: false, error: "DJ_ROOM_REQUIRED" });
@@ -918,6 +1008,16 @@ io.on("connection", (socket) => {
       cdgTime: payload.cdgTime ?? null,
       skewMs: payload.skewMs ?? null,
       rebufferCount: payload.rebufferCount ?? null,
+      cdgQuality: payload.cdgQuality || null,
+      cdgBackground: payload.cdgBackground || null,
+      backgroundQuality: payload.backgroundQuality || null,
+      videoQuality: payload.videoQuality || null,
+      videoWidth: payload.videoWidth ?? null,
+      videoHeight: payload.videoHeight ?? null,
+      rendererMetrics: safeObject(payload.rendererMetrics || {}),
+      frameMetrics: safeObject(payload.frameMetrics || {}),
+      backgroundMetrics: safeObject(payload.backgroundMetrics || {}),
+      transport: safeObject(payload.transport || {}),
       error: payload.error || null
     }, traceId, payload.level === "error" ? "error" : "info");
 
