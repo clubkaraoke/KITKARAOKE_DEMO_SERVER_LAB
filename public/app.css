@@ -360,6 +360,27 @@ select {
   z-index: 0;
   background: #000;
 }
+.tv-youtube-bg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  max-height: none;
+  z-index: 0;
+  object-fit: cover;
+  background: #000;
+  transform-origin: center center;
+  will-change: filter, transform;
+  pointer-events: none;
+}
+.tv-youtube-shade {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  background: rgba(0,0,0,.55);
+  box-shadow: inset 0 0 180px rgba(0,0,0,.62);
+}
 .tv-cdg {
   position: absolute;
   inset: 0;
@@ -381,7 +402,31 @@ select {
 .tv-empty { z-index: 3; }
 .tv-overlay { z-index: 4; }
 .background-switch {
-  grid-template-columns: repeat(5, minmax(0,1fr));
+  grid-template-columns: repeat(6, minmax(0,1fr));
+}
+.youtube-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 16px;
+  margin-top: 12px;
+}
+.youtube-slider {
+  display: grid;
+  gap: 7px;
+}
+.youtube-slider label {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  color: #c9d3e4;
+  font-size: 12px;
+  font-weight: 700;
+}
+.youtube-slider input[type="range"] {
+  min-height: 28px;
+  height: 28px;
+  padding: 0;
+  accent-color: #6d4aff;
 }
 .control-split {
   display: grid;
@@ -397,7 +442,8 @@ select {
   .background-switch { grid-template-columns: repeat(3, minmax(0,1fr)); }
 }
 @media (max-width: 720px) {
-  .control-split { grid-template-columns: 1fr; }
+  .control-split,
+  .youtube-controls { grid-template-columns: 1fr; }
   .background-switch,
   .tv-perf-grid { grid-template-columns: 1fr; }
 }
