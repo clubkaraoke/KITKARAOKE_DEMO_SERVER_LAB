@@ -48,7 +48,7 @@ No se envían tokens ni rutas completas del disco a los logs remotos.
 
 1. Descomprime el ZIP.
 2. Ejecuta `INICIAR_KITKARAOKE_AGENT.bat`.
-3. El primer inicio crea `.venv` e instala las dependencias, incluido un runtime FFmpeg para el Agent.
+3. El primer inicio crea `.venv` e instala las dependencias; FFmpeg se obtiene mediante `imageio-ffmpeg` y el ZIP ya incluye Deno portable para el resolver YouTube.
 4. Selecciona tu carpeta.
 5. Copia el código del Agent al Panel DJ.
 6. Busca una canción y pulsa **Preparar demo**.
@@ -68,6 +68,7 @@ Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip
 - Búsqueda automática por artista + título con penalización de karaoke, covers, reactions, lyrics y versiones alteradas.
 - Prioridad a candidato oficial/coincidente; fallback a la coincidencia con mayor número de vistas disponible.
 - Resolver independiente con `yt-dlp` y fallbacks DEFAULT / ANDROID_VR / WEB_SAFARI.
+- El ZIP incluye **Deno portable** verificado por SHA-256, por lo que el cliente no necesita instalar Node ni Deno por separado.
 - Video de fondo mudo, máximo 1280×720, H.264/yuv420p/`faststart`.
 - Preparación de fondo en hilo independiente: un fallo de YouTube nunca cancela el CDG.
 - Puede usar opcionalmente `cookies.txt` junto a `agent.py`; no se incluye ni se sube ningún cookie en el paquete.
