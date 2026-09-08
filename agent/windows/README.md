@@ -1,4 +1,4 @@
-# KITKARAOKE Agent para Windows — LAB V0.6
+# KITKARAOKE Agent para Windows — LAB V0.6.1
 
 Esta versión agrega preparación y transporte real de demos.
 
@@ -59,7 +59,7 @@ No se envían tokens ni rutas completas del disco a los logs remotos.
 
 Windows 10/11 con Python 3.11 o superior.
 
-Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip
+Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.1.zip
 
 
 ## Nuevo en V0.6
@@ -73,3 +73,10 @@ Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip
 - Preparación de fondo en hilo independiente: un fallo de YouTube nunca cancela el CDG.
 - Puede usar opcionalmente `cookies.txt` junto a `agent.py`; no se incluye ni se sube ningún cookie en el paquete.
 - Se mantienen las mejoras V0.5 de AUTO MP4 sin upscale.
+
+## Corrección V0.6.1
+
+- Corrige un bloqueo real de `yt-dlp`: stdout/stderr ahora se drenan mientras el proceso está activo, evitando falsos `YTDLP_TIMEOUT` por llenado del pipe.
+- Normaliza nombres con códigos de catálogo como `MRH11-06 - Keane - Bedshaped` para buscar realmente `Keane Bedshaped`.
+- Permite iniciar YouTube AUTO en vivo sobre un CDG ya preparado, sin rehacer CDG/audio.
+- Reporta el fallo del fondo al servidor para permitir reintento controlado sin afectar PLAY.
