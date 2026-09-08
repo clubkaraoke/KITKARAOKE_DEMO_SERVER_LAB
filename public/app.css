@@ -373,6 +373,14 @@ select {
   will-change: filter, transform;
   pointer-events: none;
 }
+.tv-youtube-bg:not(.hidden),
+.tv-youtube-shade:not(.hidden) {
+  animation: kitkaraokeYoutubeFadeIn .75s ease both;
+}
+@keyframes kitkaraokeYoutubeFadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
 .tv-youtube-shade {
   position: absolute;
   inset: 0;

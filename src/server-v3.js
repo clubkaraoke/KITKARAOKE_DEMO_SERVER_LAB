@@ -18,8 +18,8 @@ const DIAG_DIR = process.env.DIAG_DIR || path.join(__dirname, "..", ".diagnostic
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 80) * 1024 * 1024;
 const SEARCH_TTL_MS = 30 * 1000;
 const DIAG_LIMIT = 1500;
-const TV_CLIENT_VERSION = "LAB-TV-4.5";
-const AGENT_MIN_VERSION = "0.7.0";
+const TV_CLIENT_VERSION = "LAB-TV-4.6";
+const AGENT_MIN_VERSION = "0.8.0";
 const PUBLIC_ORIGIN = String(process.env.PUBLIC_ORIGIN || "https://demodj.kitkaraoke.com").replace(/\/$/, "");
 
 const app = express();
@@ -349,7 +349,7 @@ function createMediaJob(room, media, duration) {
         normalizeCdgBackground(media.cdgBackground || room.settings.cdgBackground) === "youtube-auto",
       source: "KITKARAOKE_AGENT"
     },
-    duration: [30, 45, 60].includes(Number(duration)) ? Number(duration) : 45,
+    duration: [30, 45, 60, 120].includes(Number(duration)) ? Number(duration) : 120,
     expected: kinds,
     // El fondo YouTube siempre es una pieza opcional para CDG. Así puede
     // activarse en vivo después de preparar el karaoke sin rehacer CDG/audio.

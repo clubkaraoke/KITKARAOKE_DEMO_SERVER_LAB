@@ -24,7 +24,7 @@ import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
@@ -364,7 +364,7 @@ class AgentApp:
             "autoNoUpscale": True,
             "youtubeBackgroundAuto": bool(self.ytdlp_available and self.ffmpeg_path),
             "youtubeSearch": bool(self.ytdlp_available),
-            "youtubeBackgroundMaxResolution": "1280x720",
+            "youtubeBackgroundMaxResolution": "854x480",
             "youtubeBackgroundMuted": True,
             "youtubeResolverDrainSafe": True,
             "youtubeLivePrepare": True,
@@ -1267,14 +1267,12 @@ class AgentApp:
     ) -> dict:
         target = f"https://www.youtube.com/watch?v={video_id}"
         fmt = (
-            "bv*[height<=720][ext=mp4][vcodec^=avc1]/"
-            "b[height<=720][ext=mp4][vcodec^=avc1]/"
-            "bv*[height<=540][ext=mp4][vcodec^=avc1]/"
-            "b[height<=540][ext=mp4][vcodec^=avc1]/"
-            "bv*[height<=720][ext=mp4]/"
-            "bv*[height<=720]/"
-            "b[height<=720][ext=mp4]/"
-            "b[height<=720]"
+            "bv*[height<=480][ext=mp4][vcodec^=avc1]/"
+            "b[height<=480][ext=mp4][vcodec^=avc1]/"
+            "bv*[height<=480][ext=mp4]/"
+            "bv*[height<=480]/"
+            "b[height<=480][ext=mp4]/"
+            "b[height<=480]"
         )
         attempts = [
             ("DEFAULT", []),
@@ -1425,8 +1423,8 @@ class AgentApp:
                         header_lines.append(f"{key}: {value}\\r\\n")
 
                 quality = str(media.get("backgroundQuality") or "normal").strip().lower()
-                target_heights = {"light": 360, "normal": 540, "premium": 720}
-                target_height = target_heights.get(quality, 540)
+                target_heights = {"light": 360, "normal": 480, "premium": 480}
+                target_height = target_heights.get(quality, 480)
                 source_width = int(stream.get("width") or 0)
                 source_height = int(stream.get("height") or 0)
                 source_codec = str(stream.get("vcodec") or "").lower()
@@ -1495,8 +1493,8 @@ class AgentApp:
                         "-c:v", "libx264",
                         "-preset", "ultrafast",
                         "-crf", "30",
-                        "-maxrate", "1400k" if target_height <= 540 else "1800k",
-                        "-bufsize", "2800k" if target_height <= 540 else "3600k",
+                        "-maxrate", "1000k" if target_height <= 480 else "1200k",
+                        "-bufsize", "2000k" if target_height <= 480 else "2400k",
                         "-pix_fmt", "yuv420p",
                         "-movflags", "+faststart",
                         str(output),
@@ -1635,14 +1633,14 @@ class AgentApp:
         room_code = str(payload.get("roomCode") or "")
         media = payload.get("media") or {}
         media_id = str(media.get("id") or "")
-        duration = int(payload.get("duration") or 45)
+        duration = int(payload.get("duration") or 120)
         uploads = payload.get("uploads") or {}
         upload_token = str(payload.get("uploadToken") or "")
         total_started = time.perf_counter()
         background_core_ready = threading.Event()
 
-        if duration not in (30, 45, 60):
-            duration = 45
+        if duration not in (30, 45, 60, 120):
+            duration = 120
 
         try:
             if not self.ffmpeg_path:
@@ -1874,7 +1872,7 @@ class AgentApp:
             trace_id = str(data.get("traceId") or "")
             room_code = str(data.get("roomCode") or "")
             media = data.get("media") or {}
-            duration = int(data.get("duration") or 45)
+            duration = int(data.get("duration") or 120)
             upload_url = str(data.get("uploadUrl") or "")
             upload_token = str(data.get("uploadToken") or "")
             if not trace_id or not upload_url or not upload_token:

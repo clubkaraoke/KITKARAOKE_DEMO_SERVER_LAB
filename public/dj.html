@@ -42,8 +42,9 @@
           <button id="stop" class="danger" disabled>■ Stop</button>
           <select id="demoDuration" aria-label="Duración del demo">
             <option value="30">Demo 30 s</option>
-            <option value="45" selected>Demo 45 s</option>
+            <option value="45">Demo 45 s</option>
             <option value="60">Demo 60 s</option>
+            <option value="120" selected>Demo 2 min</option>
           </select>
         </div>
 
@@ -88,7 +89,7 @@
               <input id="youtubeShade" type="range" min="0" max="85" step="1" value="55">
             </div>
           </div>
-          <div class="inline-note">YOUTUBE AUTO busca el videoclip en paralelo. Si falla o tarda, el CDG continúa con fondo negro/generado; nunca bloquea PLAY.</div>
+          <div class="inline-note">YOUTUBE AUTO intenta precargarse unos segundos. Si todavía no está listo, el CDG inicia con ONDAS y el videoclip entra después con transición, sin bloquear la reproducción.</div>
         </div>
 
         <div class="quality-control control-split">
@@ -599,7 +600,7 @@
 
       socket.emit("media:prepare", {
         media,
-        duration: Number(el("demoDuration").value || 45),
+        duration: Number(el("demoDuration").value || 120)
         origin: location.origin
       }, (response) => {
         if (!response.ok) {

@@ -86,8 +86,10 @@
   <script src="/sdf-karaoke-pro-renderer.js"></script>
   <script src="/cdg-engine-lite.js"></script>
   <script>
-    const TV_CLIENT_VERSION = "LAB-TV-4.5";
+    const TV_CLIENT_VERSION = "LAB-TV-4.6";
     const TRANSPORT_MODE = "HTTP_PRELOAD";
+    const YOUTUBE_PRELOAD_WAIT_MS = 6000;
+    const YOUTUBE_CROSSFADE_MS = 750;
     const socket = io({
       reconnection: true,
       reconnectionAttempts: Infinity,
@@ -178,6 +180,8 @@
     let videoBlobUrl = null;
     let youtubeBgBlobUrl = null;
     let youtubeBackgroundReady = false;
+    let youtubePreloadTimedOut = false;
+    let youtubePreloadWaitStartedAt = 0;
     let youtubeBackgroundMeta = null;
     let youtubeBlur = 14;
     let youtubeShade = 55;
@@ -528,10 +532,10 @@
       const hue = (220 + now * 0.006) % 360;
       const started = performance.now();
 
-      if (backgroundMode === "black" || backgroundMode === "youtube-auto") {
+      if (backgroundMode === "black") {
         bgCtx.fillStyle = "#000";
         bgCtx.fillRect(0, 0, w, h);
-      } else if (backgroundMode === "waves") {
+      } else if (backgroundMode === "waves" || (backgroundMode === "youtube-auto" && !youtubeBackgroundReady)) {
         fillDarkBase(bgCtx, w, h, hue);
         bgCtx.save();
         bgCtx.globalCompositeOperation = "screen";
@@ -645,7 +649,7 @@
         displayRafWindowAt = now;
       }
 
-      if (!cdgMode || backgroundMode === "black" || backgroundMode === "youtube-auto" || document.hidden) {
+      if (!cdgMode || backgroundMode === "black" || (backgroundMode === "youtube-auto" && youtubeBackgroundReady) || document.hidden) {
         bgAnimationId = requestAnimationFrame(backgroundLoop);
         return;
       }
@@ -699,7 +703,7 @@
       );
       youtubeBgVideo.classList.toggle("hidden", !useYoutube);
       youtubeBgShade.classList.toggle("hidden", !useYoutube);
-      bgCanvas.classList.toggle("hidden", !activeCdg || useYoutube);
+      bgCanvas.classList.toggle("hidden", !activeCdg);
       if (activeCdg && !useYoutube && backgroundMode === "youtube-auto") {
         drawBackground(performance.now());
       }
@@ -1075,6 +1079,45 @@
       });
     }
 
+    async function waitForYoutubePreload(seq) {
+      if (!cdgMode || backgroundMode !== "youtube-auto" || youtubeBackgroundReady) return;
+      youtubePreloadWaitStartedAt = performance.now();
+      report("YOUTUBE_PRELOAD_WAIT_START", {
+        state: "preloading",
+        timeoutMs: YOUTUBE_PRELOAD_WAIT_MS,
+        fallback: "waves"
+      });
+      const deadline = youtubePreloadWaitStartedAt + YOUTUBE_PRELOAD_WAIT_MS;
+      while (seq === loadSeq && !youtubeBackgroundReady && performance.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (seq !== loadSeq) return;
+      const waitedMs = Math.round(performance.now() - youtubePreloadWaitStartedAt);
+      if (youtubeBackgroundReady) {
+        report("YOUTUBE_PRELOAD_READY", {
+          state: "preloading",
+          waitedMs,
+          youtubeVideoId: youtubeBackgroundMeta?.youtubeId || null
+        });
+        return;
+      }
+      youtubePreloadTimedOut = true;
+      startBackground();
+      drawBackground(performance.now());
+      report("YOUTUBE_PRELOAD_TIMEOUT", {
+        state: "preloading",
+        waitedMs,
+        timeoutMs: YOUTUBE_PRELOAD_WAIT_MS,
+        karaokeContinues: true
+      }, "warn");
+      report("BACKGROUND_FALLBACK_WAVES", {
+        state: "preloading",
+        reason: "YOUTUBE_NOT_READY_WITHIN_PRELOAD_WINDOW",
+        fallback: "waves",
+        karaokeContinues: true
+      }, "warn");
+    }
+
     async function loadYoutubeBackground(url, seq, meta, source) {
       if (!url || !cdgMode || backgroundMode !== "youtube-auto") return false;
 
@@ -1121,6 +1164,7 @@
         await waitMediaReady(youtubeBgVideo);
         if (seq !== loadSeq || bgSeq !== youtubeBackgroundLoadSeq || !cdgMode) return false;
         youtubeBgVideo.currentTime = Math.max(0, Number(audio.currentTime || 0));
+        const readyLate = youtubePreloadTimedOut;
         youtubeBackgroundReady = true;
         youtubeBackgroundSourceUrl = url;
         youtubeBackgroundLoadingUrl = null;
@@ -1131,7 +1175,32 @@
           null;
         youtubeBackgroundPendingMeta = null;
         applyYoutubeBackgroundStyle();
+        if (readyLate) {
+          report("YOUTUBE_BACKGROUND_READY_LATE", {
+            state: mediaReady ? playbackStateForDiagnostic() : "preloading",
+            youtubeVideoId: youtubeBackgroundMeta?.youtubeId || null,
+            currentTime: Number(audio.currentTime || 0),
+            waitedBeyondPreloadMs: Math.max(0, Math.round(performance.now() - youtubePreloadWaitStartedAt - YOUTUBE_PRELOAD_WAIT_MS))
+          });
+          report("BACKGROUND_CROSSFADE_START", {
+            state: mediaReady ? playbackStateForDiagnostic() : "preloading",
+            durationMs: YOUTUBE_CROSSFADE_MS,
+            from: "waves",
+            to: "youtube"
+          });
+        }
         updateBackgroundVisibility();
+        if (readyLate) {
+          const traceAtFade = currentTraceId;
+          setTimeout(() => {
+            if (traceAtFade !== currentTraceId || !youtubeBackgroundReady) return;
+            report("BACKGROUND_CROSSFADE_COMPLETE", {
+              state: mediaReady ? playbackStateForDiagnostic() : "preloading",
+              durationMs: YOUTUBE_CROSSFADE_MS,
+              to: "youtube"
+            });
+          }, YOUTUBE_CROSSFADE_MS);
+        }
         if (mediaReady && !audio.paused) {
           try { await youtubeBgVideo.play(); } catch (_) {}
         }
@@ -1253,6 +1322,8 @@
       currentMedia = media;
       currentTraceId = media.traceId || null;
       mediaReady = false;
+      youtubePreloadTimedOut = false;
+      youtubePreloadWaitStartedAt = 0;
       readySeq = 0;
       cdgMode = String(media.format).toUpperCase() === "CDG";
       rebufferCount = 0;
@@ -1304,6 +1375,10 @@
         }
         const result = cdgMode ? await loadCdg(media, seq) : await loadVideo(media, seq);
         if (seq !== loadSeq) return;
+        if (cdgMode && backgroundMode === "youtube-auto") {
+          await waitForYoutubePreload(seq);
+          if (seq !== loadSeq) return;
+        }
         mediaReady = true;
         readySeq = seq;
         el("downloadMs").textContent = result.elapsedMs + " ms";
