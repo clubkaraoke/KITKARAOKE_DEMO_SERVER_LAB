@@ -38,9 +38,9 @@ PLAY sin depender de la red durante la canción
 - Búsqueda remota del catálogo autorizado del Agent.
 - CDG + audio y video local.
 - Calidad CDG: ORIGINAL / SDF LAB V2 / SDF KARAOKE PRO.
-- CDG compuesto como capa transparente.
+- CDG compuesto como capa transparente con modos **AUTO INTELIGENTE / RESPETAR ORIGINAL / FORZAR**. AUTO analiza regiones de fondo conectadas al borde para retirar fondos propios del CDG sin borrar letras interiores.
 - Fondos generados por código: Negro / Ondas / Glow / Gradiente / Partículas.
-- **YouTube AUTO para CDG**: búsqueda y preparación independiente desde el Agent, videoclip mudo detrás del CDG, con blur y oscurecimiento ajustables en vivo.
+- **YouTube AUTO para CDG**: búsqueda y preparación independiente desde el Agent, videoclip mudo detrás del CDG, con blur y oscurecimiento ajustables en vivo. Descarta karaoke/cover/reaction y prioriza oficial/coincidencia real.
 - YouTube es un enriquecimiento opcional: si búsqueda/resolución/transcodificación/precarga falla, el CDG mantiene READY/PLAY y usa el fallback generado.
 - Rendimiento de fondo: Ligero / Normal / Premium con degradación automática si la TV no sostiene FPS.
 - Video: AUTO inteligente / 360p / 540p / 720p. AUTO inspecciona la fuente, conserva resoluciones <=1280×720 y solo reduce fuentes mayores; nunca hace upscale.
@@ -82,4 +82,13 @@ Este repositorio es un LAB. No incluir claves, contraseñas, tokens de OVH ni ru
 
 Esta función es independiente de APP1. El Agent del LAB contiene su propio buscador/resolver con `yt-dlp`; APP1 no es una dependencia de ejecución.
 
-Flujo: artista+título → selección automática → resolver local → transcodificación H.264 muda <=720p → OVH TEMP CACHE → Blob local en TV. La TV compone videoclip (blur + sombra) → CDG transparente/SDF → overlays.
+Flujo: artista+título limpio → selección automática → resolver local → STREAM_COPY H.264 cuando sea compatible o FAST_TRANSCODE 360/540/720 → OVH TEMP CACHE → Blob local en TV. La TV compone videoclip (blur + sombra) → CDG transparente/SDF → overlays.
+
+
+## Mejoras Fase 4.5
+
+- TV LAB 4.5 y Agent 0.7.0.
+- AAC 192 kbps.
+- Entrega YouTube deduplicada: un fondo no se descarga dos veces por upload + metadata.
+- El fondo YouTube se pausa y vuelve a 0 cuando termina el CDG.
+- Transparencia CDG inteligente con diagnóstico CDG_BG_*.
