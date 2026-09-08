@@ -24,7 +24,7 @@ import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.7.0"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
@@ -368,6 +368,8 @@ class AgentApp:
             "youtubeBackgroundMuted": True,
             "youtubeResolverDrainSafe": True,
             "youtubeLivePrepare": True,
+            "youtubeFastPrepare": True,
+            "audioAacBitrate": "192k",
             "transportMode": "HTTP_PRELOAD",
             "fullPreloadRecommended": True,
             "version": APP_VERSION,
@@ -478,7 +480,7 @@ class AgentApp:
         ttk.Label(
             engine,
             text=(
-                "CDG: recorte + audio AAC 160 kbps. "
+                "CDG: recorte + audio AAC 192 kbps. "
                 "MP4 AUTO: detecta resolución/FPS y limita a 1280×720 sin upscale. "
                 "YouTube Background AUTO: búsqueda + selección + video mudo opcional. "
                 "La TV precarga el demo principal completo antes de PLAY."
@@ -799,7 +801,7 @@ class AgentApp:
                 "-t", str(duration),
                 "-vn",
                 "-c:a", "aac",
-                "-b:a", "160k",
+                "-b:a", "192k",
                 "-movflags", "+faststart",
                 str(audio_out),
             ],
@@ -810,7 +812,7 @@ class AgentApp:
             "AGENT_AUDIO_TRANSCODE_READY",
             {
                 "codec": "AAC",
-                "bitrate": "160k",
+                "bitrate": "192k",
                 "bytes": audio_out.stat().st_size,
                 "elapsedMs": int((time.perf_counter() - started) * 1000),
             },
@@ -833,10 +835,10 @@ class AgentApp:
 
         requested = str(video_quality or "auto").strip().lower()
         profiles = {
-            "360": {"height": 360, "crf": "24", "video_bitrate": "750k", "maxrate": "900k", "bufsize": "1800k", "audio_bitrate": "128k"},
-            "540": {"height": 540, "crf": "23", "video_bitrate": "1500k", "maxrate": "1800k", "bufsize": "3600k", "audio_bitrate": "160k"},
-            "720": {"height": 720, "crf": "22", "video_bitrate": "2800k", "maxrate": "3500k", "bufsize": "7000k", "audio_bitrate": "160k"},
-            "auto": {"height": 720, "crf": "23", "video_bitrate": None, "maxrate": None, "bufsize": None, "audio_bitrate": "160k"},
+            "360": {"height": 360, "crf": "24", "video_bitrate": "750k", "maxrate": "900k", "bufsize": "1800k", "audio_bitrate": "192k"},
+            "540": {"height": 540, "crf": "23", "video_bitrate": "1500k", "maxrate": "1800k", "bufsize": "3600k", "audio_bitrate": "192k"},
+            "720": {"height": 720, "crf": "22", "video_bitrate": "2800k", "maxrate": "3500k", "bufsize": "7000k", "audio_bitrate": "192k"},
+            "auto": {"height": 720, "crf": "23", "video_bitrate": None, "maxrate": None, "bufsize": None, "audio_bitrate": "192k"},
         }
         if requested not in profiles:
             requested = "auto"
@@ -978,12 +980,17 @@ class AgentApp:
     def _clean_youtube_component(value: str) -> str:
         text = str(value or "").replace("_", " ")
         text = re.sub(
-            r"(?i)\\b(karaoke|hifi|djgabo|club\\s+karaoke|clean\\s+edit|720p|1080p|2160p|4k|hd|fhd|uhd)\\b",
+            r"(?i)\b(karaoke|hifi|djgabo|club\s+karaoke|clean\s+edit|720p|1080p|2160p|4k|hd|fhd|uhd)\b",
             " ",
             text,
         )
-        text = re.sub(r"(?i)\\((coro|coros|voz\\s+(mujer|hombre)|instrumental)\\)", " ", text)
-        text = re.sub(r"\\s+", " ", text).strip(" -–—")
+        text = re.sub(
+            r"(?i)\((?:coro|coros|voz\s+(?:mujer|hombre)|instrumental|clean\s+edit)\)",
+            " ",
+            text,
+        )
+        text = re.sub(r"(?i)\bby\s+djgabo\b", " ", text)
+        text = re.sub(r"\s+", " ", text).strip(" -–—")
         return text
 
     def _youtube_base_args(self) -> list[str]:
@@ -1103,18 +1110,21 @@ class AgentApp:
         artist_norm = normalize_text(artist_clean)
         title_norm = normalize_text(title_clean)
         title_tokens = [t for t in title_norm.split() if len(t) > 1]
-        negative_terms = {
-            "karaoke": 140,
-            "cover": 100,
-            "reaction": 120,
-            "reaccion": 120,
-            "lyrics": 45,
-            "lyric": 45,
-            "letra": 45,
-            "slowed": 80,
-            "sped": 80,
-            "nightcore": 100,
-            "tutorial": 100,
+        hard_reject_terms = {
+            "karaoke",
+            "cover",
+            "reaction",
+            "reaccion",
+            "tutorial",
+            "slowed",
+            "nightcore",
+            "instrumental",
+        }
+        soft_negative_terms = {
+            "lyrics": 60,
+            "lyric": 60,
+            "letra": 60,
+            "sped": 70,
         }
         live_terms = (" live ", " en vivo ", " concierto ", " concert ")
 
@@ -1142,12 +1152,14 @@ class AgentApp:
                 continue
 
             lowered = title_key
+            if any(f" {term} " in lowered for term in hard_reject_terms):
+                continue
             penalty = 0
-            for term, points in negative_terms.items():
+            for term, points in soft_negative_terms.items():
                 if f" {term} " in lowered:
                     penalty += points
             if any(term in lowered for term in live_terms):
-                penalty += 30
+                penalty += 35
 
             verified = bool(entry.get("channel_is_verified"))
             official_marker = any(
@@ -1191,6 +1203,7 @@ class AgentApp:
                     "officialConfidence": official_confidence,
                     "score": score,
                     "coverage": round(coverage, 3),
+                    "artistMatch": artist_match,
                     "rank": rank,
                 }
             )
@@ -1212,7 +1225,12 @@ class AgentApp:
             )[0]
             selected["selectionReason"] = "OFFICIAL_CHANNEL_FIRST"
         else:
-            usable = [c for c in candidates if c["score"] > 0]
+            usable = [
+                c for c in candidates
+                if c["score"] > 0
+                and c["artistMatch"]
+                and c["coverage"] >= 0.50
+            ]
             if not usable:
                 raise RuntimeError("YOUTUBE_SEARCH_ONLY_LOW_CONFIDENCE_RESULTS")
             has_views = any(c["viewCount"] > 0 for c in usable)
@@ -1249,6 +1267,10 @@ class AgentApp:
     ) -> dict:
         target = f"https://www.youtube.com/watch?v={video_id}"
         fmt = (
+            "bv*[height<=720][ext=mp4][vcodec^=avc1]/"
+            "b[height<=720][ext=mp4][vcodec^=avc1]/"
+            "bv*[height<=540][ext=mp4][vcodec^=avc1]/"
+            "b[height<=540][ext=mp4][vcodec^=avc1]/"
             "bv*[height<=720][ext=mp4]/"
             "bv*[height<=720]/"
             "b[height<=720][ext=mp4]/"
@@ -1292,6 +1314,8 @@ class AgentApp:
                     "height": int(stream.get("height") or info.get("height") or 0),
                     "fps": stream.get("fps") or info.get("fps"),
                     "vcodec": str(stream.get("vcodec") or info.get("vcodec") or ""),
+                    "ext": str(stream.get("ext") or info.get("ext") or ""),
+                    "protocol": str(stream.get("protocol") or info.get("protocol") or ""),
                     "formatId": str(stream.get("format_id") or info.get("format_id") or ""),
                     "resolverMode": label,
                 }
@@ -1304,6 +1328,8 @@ class AgentApp:
                         "sourceHeight": result["height"],
                         "sourceFps": result["fps"],
                         "videoCodec": result["vcodec"],
+                        "ext": result["ext"],
+                        "protocol": result["protocol"],
                         "formatId": result["formatId"],
                     },
                     room_code=room_code,
@@ -1397,43 +1423,103 @@ class AgentApp:
                     value = str((stream.get("headers") or {}).get(key) or "")
                     if value:
                         header_lines.append(f"{key}: {value}\\r\\n")
-                args = [
+
+                quality = str(media.get("backgroundQuality") or "normal").strip().lower()
+                target_heights = {"light": 360, "normal": 540, "premium": 720}
+                target_height = target_heights.get(quality, 540)
+                source_width = int(stream.get("width") or 0)
+                source_height = int(stream.get("height") or 0)
+                source_codec = str(stream.get("vcodec") or "").lower()
+                can_stream_copy = bool(
+                    ("avc1" in source_codec or "h264" in source_codec)
+                    and source_height > 0
+                    and source_height <= target_height
+                    and source_width <= 1280
+                )
+
+                base_args = [
                     "-reconnect", "1",
                     "-reconnect_streamed", "1",
                     "-reconnect_delay_max", "5",
                 ]
                 if header_lines:
-                    args += ["-headers", "".join(header_lines)]
-                args += [
-                    "-i", stream["url"],
-                    "-t", str(duration),
-                    "-an",
-                    "-vf",
-                    "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-crf", "26",
-                    "-maxrate", "1800k",
-                    "-bufsize", "3600k",
-                    "-pix_fmt", "yuv420p",
-                    "-movflags", "+faststart",
-                    str(output),
-                ]
+                    base_args += ["-headers", "".join(header_lines)]
+
+                prepare_mode = "STREAM_COPY" if can_stream_copy else "FAST_TRANSCODE"
+                self.emit_diag(
+                    trace_id,
+                    "YOUTUBE_BACKGROUND_PREPARE_MODE",
+                    {
+                        "mode": prepare_mode,
+                        "backgroundQuality": quality,
+                        "targetHeight": target_height,
+                        "sourceWidth": source_width,
+                        "sourceHeight": source_height,
+                        "sourceCodec": stream.get("vcodec"),
+                    },
+                    room_code=room_code,
+                )
+
                 started = time.perf_counter()
-                self.run_ffmpeg(args, trace_id=trace_id)
-                transcode_ms = int((time.perf_counter() - started) * 1000)
+                if can_stream_copy:
+                    copy_args = base_args + [
+                        "-i", stream["url"],
+                        "-t", str(duration),
+                        "-an",
+                        "-c:v", "copy",
+                        "-movflags", "+faststart",
+                        str(output),
+                    ]
+                    try:
+                        self.run_ffmpeg(copy_args, trace_id=trace_id)
+                    except Exception as copy_error:
+                        self.emit_diag(
+                            trace_id,
+                            "YOUTUBE_BACKGROUND_STREAM_COPY_FALLBACK",
+                            {"error": str(copy_error)[-600:]},
+                            level="warn",
+                            room_code=room_code,
+                        )
+                        prepare_mode = "FAST_TRANSCODE"
+
+                if prepare_mode == "FAST_TRANSCODE":
+                    transcode_args = base_args + [
+                        "-i", stream["url"],
+                        "-t", str(duration),
+                        "-an",
+                        "-vf",
+                        (
+                            f"scale=w='min(1280,iw)':h='min({target_height},ih)':"
+                            "force_original_aspect_ratio=decrease:force_divisible_by=2"
+                        ),
+                        "-c:v", "libx264",
+                        "-preset", "ultrafast",
+                        "-crf", "30",
+                        "-maxrate", "1400k" if target_height <= 540 else "1800k",
+                        "-bufsize", "2800k" if target_height <= 540 else "3600k",
+                        "-pix_fmt", "yuv420p",
+                        "-movflags", "+faststart",
+                        str(output),
+                    ]
+                    self.run_ffmpeg(transcode_args, trace_id=trace_id)
+
+                prepare_ms = int((time.perf_counter() - started) * 1000)
                 out_info = self.probe_video(output)
                 meta = {
                     **selected,
-                    "sourceWidth": int(stream.get("width") or 0),
-                    "sourceHeight": int(stream.get("height") or 0),
+                    "sourceWidth": source_width,
+                    "sourceHeight": source_height,
                     "sourceFps": stream.get("fps"),
+                    "sourceCodec": stream.get("vcodec"),
                     "outputWidth": int(out_info.get("width") or 0),
                     "outputHeight": int(out_info.get("height") or 0),
                     "outputFps": out_info.get("fps"),
                     "resolverMode": stream.get("resolverMode"),
+                    "prepareMode": prepare_mode,
+                    "backgroundQuality": quality,
+                    "targetHeight": target_height,
                     "bytes": output.stat().st_size,
-                    "elapsedMs": transcode_ms,
+                    "elapsedMs": prepare_ms,
                     "muted": True,
                 }
                 self.emit_diag(
