@@ -18,25 +18,29 @@ jobs:
       - name: Validate agent
         run: |
           python3 -m py_compile agent/windows/agent.py
-          grep -q 'APP_VERSION = "0.5.0"' agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.6.0"' agent/windows/agent.py
           grep -q 'AGENT_PREPARE_COMPLETE' agent/windows/agent.py
           grep -q 'AGENT_VIDEO_SOURCE_PROBED' agent/windows/agent.py
           grep -q 'AUTO_UPSCALE_GUARD' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_SELECTED' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_FALLBACK' agent/windows/agent.py
+          grep -q 'youtubeBackgroundNonBlocking' agent/windows/agent.py
+          grep -q '^yt-dlp' agent/windows/requirements.txt
 
       - name: Build ZIP
         run: |
-          mkdir -p dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.5
-          cp agent/windows/agent.py dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.5/
-          cp agent/windows/requirements.txt dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.5/
-          cp agent/windows/INICIAR_KITKARAOKE_AGENT.bat dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.5/
-          cp agent/windows/README.md dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.5/
+          mkdir -p dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
+          cp agent/windows/agent.py dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6/
+          cp agent/windows/requirements.txt dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6/
+          cp agent/windows/INICIAR_KITKARAOKE_AGENT.bat dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6/
+          cp agent/windows/README.md dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6/
           cd dist
-          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.5.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.5
+          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
 
       - name: Upload ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.5
-          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.5.zip
+          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
+          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip
           if-no-files-found: error
           retention-days: 14
