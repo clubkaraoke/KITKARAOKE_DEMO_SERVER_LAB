@@ -92,8 +92,16 @@ jobs:
           grep -q 'data-video-quality="720"' public/dj.html
           grep -q 'transparentBackground' public/sdf-renderer.js
           grep -q 'transparentBackground' public/sdf-karaoke-pro-renderer.js
-          grep -q 'APP_VERSION = "0.4.0"' agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.5.0"' agent/windows/agent.py
           grep -q '"videoQualities": \["auto", "360", "540", "720"\]' agent/windows/agent.py
+          grep -q '"smartAutoResolution": True' agent/windows/agent.py
+          grep -q 'AGENT_VIDEO_SOURCE_PROBED' agent/windows/agent.py
+          grep -q 'AGENT_VIDEO_QUALITY_DECISION' agent/windows/agent.py
+          grep -q 'AUTO_KEEP_SOURCE_RESOLUTION' agent/windows/agent.py
+          grep -q 'AUTO_DOWNSCALE_TO_720P_CAP' agent/windows/agent.py
+          grep -q 'AUTO_UPSCALE_GUARD' agent/windows/agent.py
+          grep -q "min(1280,iw)" agent/windows/agent.py
+          grep -q "min(720,ih)" agent/windows/agent.py
           grep -q 'Descargar TXT' public/dj.html
 
       - name: Start server
