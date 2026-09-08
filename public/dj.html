@@ -65,8 +65,20 @@
             <button type="button" class="quality-btn" data-bg="glow">GLOW</button>
             <button type="button" class="quality-btn" data-bg="gradient">GRADIENTE</button>
             <button type="button" class="quality-btn" data-bg="particles">PARTÍCULAS</button>
+            <button type="button" class="quality-btn" data-bg="youtube-auto">YOUTUBE AUTO</button>
           </div>
           <div id="cdgBackgroundNote" class="inline-note">NEGRO · fondo clásico. Las letras CDG se renderizan como capa transparente.</div>
+          <div class="youtube-controls" id="youtubeBackgroundControls">
+            <div class="youtube-slider">
+              <label for="youtubeBlur"><span>Desenfoque</span><strong id="youtubeBlurValue">14 px</strong></label>
+              <input id="youtubeBlur" type="range" min="0" max="30" step="1" value="14">
+            </div>
+            <div class="youtube-slider">
+              <label for="youtubeShade"><span>Oscurecimiento</span><strong id="youtubeShadeValue">55%</strong></label>
+              <input id="youtubeShade" type="range" min="0" max="85" step="1" value="55">
+            </div>
+          </div>
+          <div class="inline-note">YOUTUBE AUTO busca el videoclip en paralelo. Si falla o tarda, el CDG continúa con fondo negro/generado; nunca bloquea PLAY.</div>
         </div>
 
         <div class="quality-control control-split">
@@ -177,6 +189,8 @@
     let selectedCdgBackground = localStorage.getItem("kitkaraoke-cdg-background") || "black";
     let selectedBackgroundQuality = localStorage.getItem("kitkaraoke-bg-quality") || "normal";
     let selectedVideoQuality = localStorage.getItem("kitkaraoke-video-quality") || "auto";
+    let selectedYoutubeBlur = Math.max(0, Math.min(30, Number(localStorage.getItem("kitkaraoke-youtube-blur") || 14)));
+    let selectedYoutubeShade = Math.max(0, Math.min(85, Number(localStorage.getItem("kitkaraoke-youtube-shade") || 55)));
 
     const el = (id) => document.getElementById(id);
     const logEl = el("log");
@@ -272,7 +286,8 @@
           "FFmpeg: " + (caps.ffmpeg ? "LISTO" : "NO") +
           " · CDG→AAC: " + (caps.cdgAacDemo ? "LISTO" : "NO") +
           " · MP4 H.264: " + (caps.mp4H264Demo ? "LISTO" : "NO") +
-          " · Video: " + (Array.isArray(caps.videoQualities) ? caps.videoQualities.join("/") : "auto/360/540/720");
+          " · Video: " + (Array.isArray(caps.videoQualities) ? caps.videoQualities.join("/") : "auto/360/540/720") +
+          " · YouTube AUTO: " + (caps.youtubeBackgroundAuto ? "LISTO" : "NO");
         el("searchNote").textContent = "PC conectado. Escribe artista o título.";
       } else {
         el("agentInfo").textContent = agent
@@ -298,14 +313,16 @@
       waves: "ONDAS",
       glow: "GLOW",
       gradient: "GRADIENTE",
-      particles: "PARTÍCULAS"
+      particles: "PARTÍCULAS",
+      "youtube-auto": "YOUTUBE AUTO"
     };
     const BG_NOTES = {
       black: "NEGRO · fondo clásico. Las letras CDG se renderizan como capa transparente.",
       waves: "ONDAS · bandas luminosas suaves generadas por código.",
       glow: "GLOW · luces difusas en movimiento, estilo escenario.",
       gradient: "GRADIENTE · color profundo animado, ligero y continuo.",
-      particles: "PARTÍCULAS · puntos luminosos suaves sobre fondo oscuro."
+      particles: "PARTÍCULAS · puntos luminosos suaves sobre fondo oscuro.",
+      "youtube-auto": "YOUTUBE AUTO · busca videoclip oficial primero; si no, usa la mejor coincidencia por visualizaciones. El video va mudo detrás del CDG."
     };
     const BG_QUALITY_NOTES = {
       light: "LIGERO · 20 FPS y menor resolución interna para TVs de entrada.",
@@ -313,7 +330,7 @@
       premium: "PREMIUM · hasta 60 FPS; la TV puede bajar automáticamente si detecta carga."
     };
     const VIDEO_QUALITY_NOTES = {
-      auto: "AUTO · hasta 720p; se aplica al próximo demo de video.",
+      auto: "AUTO · detecta la fuente, evita upscale y limita a 720p; se aplica al próximo demo de video.",
       "360": "360p · menor consumo y preparación más rápida; se aplica al próximo demo.",
       "540": "540p · punto medio para redes o TVs moderadas; se aplica al próximo demo.",
       "720": "720p · máxima calidad de video del LAB; se aplica al próximo demo."
@@ -374,6 +391,21 @@
       simpleLog("Calidad de video seleccionada", { mode });
     }
 
+    function setYoutubeStyle(blur, shade, notify = true) {
+      selectedYoutubeBlur = Math.max(0, Math.min(30, Math.round(Number(blur) || 0)));
+      selectedYoutubeShade = Math.max(0, Math.min(85, Math.round(Number(shade) || 0)));
+      localStorage.setItem("kitkaraoke-youtube-blur", String(selectedYoutubeBlur));
+      localStorage.setItem("kitkaraoke-youtube-shade", String(selectedYoutubeShade));
+      el("youtubeBlur").value = String(selectedYoutubeBlur);
+      el("youtubeShade").value = String(selectedYoutubeShade);
+      el("youtubeBlurValue").textContent = selectedYoutubeBlur + " px";
+      el("youtubeShadeValue").textContent = selectedYoutubeShade + "%";
+      if (notify) emitPlayerSettings({
+        youtubeBlur: selectedYoutubeBlur,
+        youtubeShade: selectedYoutubeShade
+      });
+    }
+
     document.querySelectorAll("#cdgQualitySwitch .quality-btn").forEach((button) => {
       button.addEventListener("click", () => setCdgQuality(button.dataset.quality));
     });
@@ -386,11 +418,18 @@
     document.querySelectorAll("#videoQualitySwitch .quality-btn").forEach((button) => {
       button.addEventListener("click", () => setVideoQuality(button.dataset.videoQuality));
     });
+    el("youtubeBlur").addEventListener("input", (event) => {
+      setYoutubeStyle(event.target.value, selectedYoutubeShade, true);
+    });
+    el("youtubeShade").addEventListener("input", (event) => {
+      setYoutubeStyle(selectedYoutubeBlur, event.target.value, true);
+    });
 
     setCdgQuality(selectedCdgQuality, false);
     setCdgBackground(selectedCdgBackground, false);
     setBackgroundQuality(selectedBackgroundQuality, false);
     setVideoQuality(selectedVideoQuality, false);
+    setYoutubeStyle(selectedYoutubeBlur, selectedYoutubeShade, false);
 
     socket.on("connect", () => {
       el("dot").classList.add("online");
@@ -417,6 +456,11 @@
         setCdgBackground(room.settings.cdgBackground || selectedCdgBackground, false);
         setBackgroundQuality(room.settings.backgroundQuality || selectedBackgroundQuality, false);
         setVideoQuality(room.settings.videoQuality || selectedVideoQuality, false);
+        setYoutubeStyle(
+          room.settings.youtubeBlur ?? selectedYoutubeBlur,
+          room.settings.youtubeShade ?? selectedYoutubeShade,
+          false
+        );
       }
     });
 
@@ -504,11 +548,15 @@
       const media = {
         id: item.id,
         title: item.artist ? item.artist + " - " + item.title : item.title,
+        artist: item.artist || "",
+        songTitle: item.title || "",
         format: item.format,
         audio: item.audio || null,
         cdgQuality: String(item.format).toUpperCase() === "CDG" ? selectedCdgQuality : null,
         cdgBackground: String(item.format).toUpperCase() === "CDG" ? selectedCdgBackground : null,
         backgroundQuality: String(item.format).toUpperCase() === "CDG" ? selectedBackgroundQuality : null,
+        youtubeBlur: String(item.format).toUpperCase() === "CDG" ? selectedYoutubeBlur : null,
+        youtubeShade: String(item.format).toUpperCase() === "CDG" ? selectedYoutubeShade : null,
         videoQuality: String(item.format).toUpperCase() === "CDG" ? null : selectedVideoQuality,
         source: "KITKARAOKE_AGENT"
       };
