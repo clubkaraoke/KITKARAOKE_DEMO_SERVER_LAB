@@ -167,7 +167,12 @@ class AgentApp:
         self.ffmpeg_path = self.detect_ffmpeg()
         self.ffprobe_path = self.detect_ffprobe()
         self.node_path = shutil.which("node") or shutil.which("nodejs") or ""
-        self.deno_path = shutil.which("deno") or ""
+        bundled_deno = Path(__file__).resolve().parent / "engine" / "deno.exe"
+        self.deno_path = (
+            str(bundled_deno)
+            if bundled_deno.exists()
+            else (shutil.which("deno") or "")
+        )
         self.ytdlp_available = importlib.util.find_spec("yt_dlp") is not None
         self.prepare_lock = threading.Lock()
         self.cancelled_traces: set[str] = set()
@@ -199,7 +204,7 @@ class AgentApp:
             self.add_log("ERROR: no se encontró FFmpeg.")
 
         if self.ytdlp_available:
-            runtime = "Node" if self.node_path else ("Deno" if self.deno_path else "runtime JS automático")
+            runtime = "Deno" if self.deno_path else ("Node" if self.node_path else "SIN runtime JS")
             self.add_log(f"YouTube Background AUTO listo · yt-dlp + {runtime}.")
         else:
             self.add_log("YouTube Background AUTO no disponible · falta instalar yt-dlp.")
@@ -994,10 +999,10 @@ class AgentApp:
             "--extractor-retries",
             "2",
         ]
-        if self.node_path:
-            args += ["--js-runtimes", f"node:{self.node_path}"]
-        elif self.deno_path:
+        if self.deno_path:
             args += ["--js-runtimes", f"deno:{self.deno_path}"]
+        elif self.node_path:
+            args += ["--js-runtimes", f"node:{self.node_path}"]
         cookies = Path(__file__).with_name("cookies.txt")
         try:
             if cookies.exists() and cookies.stat().st_size > 100:
