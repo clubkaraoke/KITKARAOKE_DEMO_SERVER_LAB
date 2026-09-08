@@ -334,9 +334,9 @@ select {
 }
 .tv-diag-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(130px, 1fr));
+  grid-template-columns: repeat(2, minmax(145px, 1fr));
   gap: 8px;
-  min-width: min(100%, 320px);
+  min-width: min(100%, 390px);
 }
 .copy-status {
   margin-top: 10px;

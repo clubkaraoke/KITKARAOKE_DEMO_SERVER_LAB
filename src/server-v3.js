@@ -18,7 +18,7 @@ const DIAG_DIR = process.env.DIAG_DIR || path.join(__dirname, "..", ".diagnostic
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 80) * 1024 * 1024;
 const SEARCH_TTL_MS = 30 * 1000;
 const DIAG_LIMIT = 1500;
-const TV_CLIENT_VERSION = "LAB-TV-4.6";
+const TV_CLIENT_VERSION = "LAB-TV-4.7";
 const AGENT_MIN_VERSION = "0.8.0";
 const PUBLIC_ORIGIN = String(process.env.PUBLIC_ORIGIN || "https://demodj.kitkaraoke.com").replace(/\/$/, "");
 

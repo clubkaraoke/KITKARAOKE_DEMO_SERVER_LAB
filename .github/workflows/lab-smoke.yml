@@ -60,12 +60,18 @@ jobs:
           grep -q 'SDF KARAOKE PRO' public/dj.html
           grep -q 'Copiar logs TV' public/tv.html
           grep -q 'buildTvDiagnosticText' public/tv.html
+          grep -q 'Copiar JSON corto' public/tv.html
+          grep -q 'Descargar JSON' public/tv.html
+          grep -q 'buildTvDiagnosticJsonObject' public/tv.html
+          grep -q 'KITKARAOKE_TV_SUPPORT_V1' public/tv.html
+          grep -q 'TV_DIAG_EVENT_LIMIT = 240' public/tv.html
+          grep -q 'application/json;charset=utf-8' public/tv.html
           grep -q 'TV_BACKGROUND_FALLBACK' public/tv.html
           grep -q 'requestVideoFrameCallback' public/tv.html
           grep -q 'TV_PRELOAD_RETRY' public/tv.html
           grep -q 'TV_PLAY_ABORTED_BY_LOAD' public/tv.html
           grep -q 'TV_VIDEO_FREEZE' public/tv.html
-          grep -q 'LAB-TV-4.6' public/tv.html
+          grep -q 'LAB-TV-4.7' public/tv.html
           grep -q 'SDF_FRAME_MIN_MS = 25' public/tv.html
           grep -q 'TV_LOAD_HANDLER_ERROR' public/tv.html
           grep -q 'TV_JS_ERROR' public/tv.html

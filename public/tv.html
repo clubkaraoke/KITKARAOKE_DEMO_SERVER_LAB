@@ -64,7 +64,9 @@
           <div class="inline-note">Copia todo el log aunque no esté visible en pantalla.</div>
         </div>
         <div class="tv-diag-actions">
-          <button id="copyTvLogs" class="secondary" type="button">Copiar logs TV</button>
+          <button id="copyTvJson" class="secondary" type="button">Copiar JSON corto</button>
+          <button id="downloadTvJson" class="secondary" type="button">Descargar JSON</button>
+          <button id="copyTvLogs" class="secondary" type="button">Copiar TXT completo</button>
           <button id="downloadTvLogs" class="secondary" type="button">Descargar TXT</button>
         </div>
       </div>
@@ -86,7 +88,7 @@
   <script src="/sdf-karaoke-pro-renderer.js"></script>
   <script src="/cdg-engine-lite.js"></script>
   <script>
-    const TV_CLIENT_VERSION = "LAB-TV-4.6";
+    const TV_CLIENT_VERSION = "LAB-TV-4.7";
     const TRANSPORT_MODE = "HTTP_PRELOAD";
     const YOUTUBE_PRELOAD_WAIT_MS = 6000;
     const YOUTUBE_CROSSFADE_MS = 750;
@@ -200,6 +202,9 @@
     let pendingBufferEvent = null;
     let pendingBufferStartedAt = 0;
     let pendingBufferMediaTime = 0;
+
+    const TV_DIAG_EVENT_LIMIT = 240;
+    const tvDiagnosticEvents = [];
 
     const rendererMetrics = {
       renderer: "original",
@@ -873,7 +878,51 @@
       if (detail) el("preload").textContent = detail;
     }
 
-    function localLog(message, data) {
+    function compactDiagnosticValue(value, depth = 0) {
+      if (depth > 4) return "[depth-limit]";
+      if (value == null || typeof value === "boolean" || typeof value === "number") return value;
+      if (typeof value === "string") {
+        let text = value;
+        if (/^https?:\/\//i.test(text)) {
+          try {
+            const u = new URL(text);
+            text = u.origin + u.pathname;
+          } catch (_) {}
+        }
+        if (text.length > 320) text = text.slice(0, 317) + "...";
+        return text;
+      }
+      if (Array.isArray(value)) return value.slice(0, 24).map((item) => compactDiagnosticValue(item, depth + 1));
+      if (typeof value === "object") {
+        const out = {};
+        for (const [key, item] of Object.entries(value)) {
+          if (/token|authorization|cookie|secret|password/i.test(key)) {
+            out[key] = "[redacted]";
+            continue;
+          }
+          out[key] = compactDiagnosticValue(item, depth + 1);
+        }
+        return out;
+      }
+      return String(value).slice(0, 320);
+    }
+
+    function rememberTvDiagnosticEvent(message, data, level = "info") {
+      tvDiagnosticEvents.push({
+        at: new Date().toISOString(),
+        event: String(message || ""),
+        level: String(level || "info"),
+        traceId: currentTraceId || null,
+        state: el("state").textContent,
+        data: compactDiagnosticValue(data || null)
+      });
+      if (tvDiagnosticEvents.length > TV_DIAG_EVENT_LIMIT) {
+        tvDiagnosticEvents.splice(0, tvDiagnosticEvents.length - TV_DIAG_EVENT_LIMIT);
+      }
+    }
+
+    function localLog(message, data, level = "info") {
+      rememberTvDiagnosticEvent(message, data, level);
       const line = "[" + new Date().toLocaleTimeString() + "] " + message +
         (data ? "\n" + JSON.stringify(data, null, 2) : "");
       el("tvLog").textContent = line + "\n\n" + el("tvLog").textContent;
@@ -915,7 +964,7 @@
 
     function report(event, extra = {}, level = "info") {
       if (!roomCode) {
-        localLog(event, extra);
+        localLog(event, extra, level);
         return;
       }
       socket.emit("player:status", {
@@ -927,7 +976,57 @@
         level,
         ...extra
       });
-      localLog(event, extra);
+      localLog(event, extra, level);
+    }
+
+    function buildTvDiagnosticJsonObject() {
+      const traceEvents = tvDiagnosticEvents.filter((item) => {
+        if (!currentTraceId) return true;
+        return item.traceId === currentTraceId || item.traceId == null;
+      });
+      const eventCounts = {};
+      for (const item of traceEvents) {
+        eventCounts[item.event] = (eventCounts[item.event] || 0) + 1;
+      }
+      return {
+        schema: "KITKARAOKE_TV_SUPPORT_V1",
+        version: TV_CLIENT_VERSION,
+        generatedAt: new Date().toISOString(),
+        roomCode: roomCode || null,
+        traceId: currentTraceId || null,
+        state: el("state").textContent,
+        media: currentMedia ? compactDiagnosticValue({
+          id: currentMedia.id,
+          title: currentMedia.title,
+          format: currentMedia.format,
+          duration: currentMedia.duration,
+          cdgQuality: activeCdgQuality,
+          cdgBackground: backgroundMode,
+          cdgTransparencyMode,
+          backgroundQuality: activeBackgroundQuality,
+          videoQuality: currentMedia.videoQuality || null,
+          youtubeBackgroundReady,
+          youtubeBlur,
+          youtubeShade,
+          youtubeBackgroundMeta,
+          transport: currentMedia.transport || TRANSPORT_MODE
+        }) : null,
+        summary: {
+          rebufferCount,
+          preload: el("downloadMs").textContent,
+          youtubePreloadTimedOut,
+          youtubeBackgroundReady,
+          playbackTime: Number((cdgMode ? audio.currentTime : video.currentTime) || 0),
+          eventCount: traceEvents.length,
+          eventCounts
+        },
+        telemetry: compactDiagnosticValue(telemetrySnapshot()),
+        events: traceEvents.slice(-160)
+      };
+    }
+
+    function buildTvDiagnosticJson() {
+      return JSON.stringify(buildTvDiagnosticJsonObject(), null, 2);
     }
 
     function buildTvDiagnosticText() {
@@ -1000,8 +1099,8 @@
       return ok;
     }
 
-    function downloadTextFile(name, content) {
-      const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    function downloadTextFile(name, content, mime = "text/plain;charset=utf-8") {
+      const blob = new Blob([content], { type: mime });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.href = url;
@@ -1772,6 +1871,39 @@
       });
     }
 
+    el("copyTvJson").addEventListener("click", async () => {
+      const text = buildTvDiagnosticJson();
+      const button = el("copyTvJson");
+      const status = el("copyTvStatus");
+      const original = button.textContent;
+      button.disabled = true;
+      button.textContent = "Copiando JSON…";
+      const ok = await copyTextWithFallback(text);
+      if (ok) {
+        button.textContent = "✓ JSON copiado";
+        status.textContent = "JSON corto copiado: " + text.length.toLocaleString() +
+          " caracteres · trace " + (currentTraceId ? currentTraceId.slice(0, 8) : "—") +
+          ". Este es el recomendado para pegar en ChatGPT.";
+      } else {
+        button.textContent = "No se pudo copiar";
+        status.textContent = "El navegador bloqueó el portapapeles. Usa Descargar JSON.";
+      }
+      setTimeout(() => { button.disabled = false; button.textContent = original; }, 2200);
+    });
+
+    el("downloadTvJson").addEventListener("click", () => {
+      const text = buildTvDiagnosticJson();
+      const room = roomCode || "SIN_SALA";
+      const trace = currentTraceId ? currentTraceId.slice(0, 8) : "SIN_TRACE";
+      const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+      downloadTextFile(
+        "KITKARAOKE_TV_SUPPORT_" + room + "_" + trace + "_" + stamp + ".json",
+        text,
+        "application/json;charset=utf-8"
+      );
+      el("copyTvStatus").textContent = "JSON corto generado · recomendado para compartir.";
+    });
+
     el("copyTvLogs").addEventListener("click", async () => {
       const text = buildTvDiagnosticText();
       const button = el("copyTvLogs");
@@ -1782,8 +1914,9 @@
       const ok = await copyTextWithFallback(text);
       if (ok) {
         button.textContent = "✓ Copiado";
-        status.textContent = "Copiado completo: " + text.length.toLocaleString() +
-          " caracteres · trace " + (currentTraceId ? currentTraceId.slice(0, 8) : "—");
+        status.textContent = "TXT completo copiado: " + text.length.toLocaleString() +
+          " caracteres · trace " + (currentTraceId ? currentTraceId.slice(0, 8) : "—") +
+          ". Si pesa demasiado, usa Copiar JSON corto.";
       } else {
         button.textContent = "No se pudo copiar";
         status.textContent = "El navegador bloqueó el portapapeles. Usa Descargar TXT.";
