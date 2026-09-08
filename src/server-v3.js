@@ -841,6 +841,8 @@ io.on("connection", (socket) => {
       room.settings.cdgQuality = job.media.cdgQuality;
       room.settings.cdgBackground = job.media.cdgBackground;
       room.settings.backgroundQuality = job.media.backgroundQuality;
+      room.settings.youtubeBlur = job.media.youtubeBlur;
+      room.settings.youtubeShade = job.media.youtubeShade;
     } else {
       room.settings.videoQuality = job.media.videoQuality;
     }
@@ -921,7 +923,8 @@ io.on("connection", (socket) => {
       String(payload.event || "AGENT_EVENT").slice(0, 80),
       payload.data || {},
       traceId || null,
-      payload.level === "error" ? "error" : "info"
+      payload.level === "error" ? "error" :
+      payload.level === "warn" ? "warn" : "info"
     );
     ack({ ok: true });
   });
