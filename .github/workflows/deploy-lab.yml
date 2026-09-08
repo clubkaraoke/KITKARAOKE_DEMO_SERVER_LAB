@@ -1,6 +1,14 @@
 name: Deploy LAB to OVH
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "src/**"
+      - "public/**"
+      - "Dockerfile"
+      - "docker-compose.yml"
+      - ".github/workflows/deploy-lab.yml"
   workflow_dispatch:
 
 concurrency:
