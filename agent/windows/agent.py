@@ -1309,6 +1309,7 @@ class AgentApp:
         upload_token: str,
         trace_id: str,
         room_code: str,
+        core_ready_event: threading.Event | None = None,
     ) -> None:
         try:
             if not upload_url:
@@ -1333,6 +1334,22 @@ class AgentApp:
                 room_code,
             )
             self.ensure_not_cancelled(trace_id)
+
+            if core_ready_event is not None and not core_ready_event.is_set():
+                self.emit_diag(
+                    trace_id,
+                    "YOUTUBE_BACKGROUND_WAIT_CORE",
+                    {
+                        "reason": "avoid-parallel-ffmpeg-contention",
+                        "searchAndResolveAlreadyComplete": True,
+                    },
+                    room_code=room_code,
+                )
+                wait_started = time.perf_counter()
+                while not core_ready_event.wait(0.20):
+                    self.ensure_not_cancelled(trace_id)
+                    if time.perf_counter() - wait_started > 90:
+                        raise RuntimeError("YOUTUBE_BACKGROUND_CORE_WAIT_TIMEOUT")
 
             with tempfile.TemporaryDirectory(prefix="kitkaraoke-youtube-bg-") as temp:
                 output = Path(temp) / "background.mp4"
@@ -1485,6 +1502,7 @@ class AgentApp:
         uploads = payload.get("uploads") or {}
         upload_token = str(payload.get("uploadToken") or "")
         total_started = time.perf_counter()
+        background_core_ready = threading.Event()
 
         if duration not in (30, 45, 60):
             duration = 45
@@ -1540,6 +1558,7 @@ class AgentApp:
                         upload_token,
                         trace_id,
                         room_code,
+                        background_core_ready,
                     ),
                     daemon=True,
                 ).start()
@@ -1570,6 +1589,7 @@ class AgentApp:
                         str(media.get("videoQuality") or "auto"),
                     )
 
+                background_core_ready.set()
                 self.ensure_not_cancelled(trace_id)
                 total_bytes = 0
                 upload_ms = 0
@@ -1612,6 +1632,7 @@ class AgentApp:
             )
             self.ui(self.prepare_var.set, "Demo listo · enviado a OVH")
         except Exception as exc:
+            background_core_ready.set()
             error_text = str(exc)
             if error_text == "PREPARE_SUPERSEDED":
                 self.emit_diag(
