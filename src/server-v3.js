@@ -18,8 +18,8 @@ const DIAG_DIR = process.env.DIAG_DIR || path.join(__dirname, "..", ".diagnostic
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 80) * 1024 * 1024;
 const SEARCH_TTL_MS = 30 * 1000;
 const DIAG_LIMIT = 1500;
-const TV_CLIENT_VERSION = "LAB-TV-4.4";
-const AGENT_MIN_VERSION = "0.6.1";
+const TV_CLIENT_VERSION = "LAB-TV-4.5";
+const AGENT_MIN_VERSION = "0.7.0";
 const PUBLIC_ORIGIN = String(process.env.PUBLIC_ORIGIN || "https://demodj.kitkaraoke.com").replace(/\/$/, "");
 
 const app = express();
@@ -152,6 +152,7 @@ function newRoom(code, djSocketId) {
     settings: {
       cdgQuality: "original",
       cdgBackground: "black",
+      cdgTransparencyMode: "auto",
       backgroundQuality: "normal",
       videoQuality: "auto",
       youtubeBlur: 14,
@@ -248,6 +249,12 @@ function normalizeCdgBackground(value) {
   return allowed.has(mode) ? mode : "black";
 }
 
+function normalizeCdgTransparencyMode(value) {
+  const mode = String(value || "").trim().toLowerCase();
+  const allowed = new Set(["auto", "original", "force"]);
+  return allowed.has(mode) ? mode : "auto";
+}
+
 function normalizeBackgroundQuality(value) {
   const mode = String(value || "").trim().toLowerCase();
   const allowed = new Set(["light", "normal", "premium"]);
@@ -322,6 +329,7 @@ function createMediaJob(room, media, duration) {
       audio: String(media.audio || "").toUpperCase(),
       cdgQuality: normalizeCdgQuality(media.cdgQuality || room.settings.cdgQuality),
       cdgBackground: normalizeCdgBackground(media.cdgBackground || room.settings.cdgBackground),
+      cdgTransparencyMode: normalizeCdgTransparencyMode(media.cdgTransparencyMode || room.settings.cdgTransparencyMode),
       backgroundQuality: normalizeBackgroundQuality(media.backgroundQuality || room.settings.backgroundQuality),
       videoQuality: String(media.format || "").toUpperCase() === "CDG"
         ? null
@@ -423,6 +431,7 @@ function sendPreparedMedia(job) {
     format: media.format,
     cdgQuality: media.cdgQuality || null,
     cdgBackground: media.cdgBackground || null,
+    cdgTransparencyMode: media.cdgTransparencyMode || null,
     backgroundQuality: media.backgroundQuality || null,
     videoQuality: media.videoQuality || null,
     youtubeBackground: Boolean(media.youtubeBackground),
@@ -573,23 +582,15 @@ app.put("/api/upload/:traceId/:kind", async (req, res) => {
       job.backgroundState = "uploaded";
       const room = rooms.get(job.roomCode);
       if (room && room.playback.traceId === traceId && room.playback.media) {
+        // Solo registramos el archivo aquí. La orden player:background se envía
+        // una sola vez cuando llega agent:background:complete con metadata final.
         room.playback.media.urls = {
           ...(room.playback.media.urls || {}),
           background: playbackUrl(job, "background")
         };
-        room.playback.media.youtubeBackgroundMeta = job.backgroundMeta || null;
-        io.to(room.code).emit("player:background", {
-          traceId,
-          url: playbackUrl(job, "background"),
-          meta: job.backgroundMeta || null,
-          blur: room.settings.youtubeBlur,
-          shade: room.settings.youtubeShade,
-          sentAt: Date.now()
-        });
-        diag(job.roomCode, "OVH", "YOUTUBE_BACKGROUND_SENT_TO_TV", {
+        diag(job.roomCode, "OVH", "YOUTUBE_BACKGROUND_UPLOAD_STORED", {
           bytes: stat.size,
-          async: job.status === "ready",
-          meta: job.backgroundMeta || null
+          awaitingAgentComplete: true
         }, traceId);
       }
     }
@@ -926,6 +927,7 @@ io.on("connection", (socket) => {
     if (job.media.format === "CDG") {
       room.settings.cdgQuality = job.media.cdgQuality;
       room.settings.cdgBackground = job.media.cdgBackground;
+      room.settings.cdgTransparencyMode = job.media.cdgTransparencyMode;
       room.settings.backgroundQuality = job.media.backgroundQuality;
       room.settings.youtubeBlur = job.media.youtubeBlur;
       room.settings.youtubeShade = job.media.youtubeShade;
@@ -1154,6 +1156,7 @@ io.on("connection", (socket) => {
     const next = {
       cdgQuality: payload.cdgQuality == null ? room.settings.cdgQuality : normalizeCdgQuality(payload.cdgQuality),
       cdgBackground: payload.cdgBackground == null ? room.settings.cdgBackground : normalizeCdgBackground(payload.cdgBackground),
+      cdgTransparencyMode: payload.cdgTransparencyMode == null ? room.settings.cdgTransparencyMode : normalizeCdgTransparencyMode(payload.cdgTransparencyMode),
       backgroundQuality: payload.backgroundQuality == null ? room.settings.backgroundQuality : normalizeBackgroundQuality(payload.backgroundQuality),
       videoQuality: payload.videoQuality == null ? room.settings.videoQuality : normalizeVideoQuality(payload.videoQuality),
       youtubeBlur: payload.youtubeBlur == null ? room.settings.youtubeBlur : normalizeYoutubeBlur(payload.youtubeBlur),
@@ -1164,6 +1167,7 @@ io.on("connection", (socket) => {
     if (room.playback.media && String(room.playback.media.format || "").toUpperCase() === "CDG") {
       room.playback.media.cdgQuality = next.cdgQuality;
       room.playback.media.cdgBackground = next.cdgBackground;
+      room.playback.media.cdgTransparencyMode = next.cdgTransparencyMode;
       room.playback.media.backgroundQuality = next.backgroundQuality;
       room.playback.media.youtubeBlur = next.youtubeBlur;
       room.playback.media.youtubeShade = next.youtubeShade;
@@ -1285,6 +1289,7 @@ io.on("connection", (socket) => {
       rebufferCount: payload.rebufferCount ?? null,
       cdgQuality: payload.cdgQuality || null,
       cdgBackground: payload.cdgBackground || null,
+      cdgTransparencyMode: payload.cdgTransparencyMode || null,
       backgroundQuality: payload.backgroundQuality || null,
       videoQuality: payload.videoQuality || null,
       videoWidth: payload.videoWidth ?? null,
