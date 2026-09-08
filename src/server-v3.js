@@ -18,6 +18,9 @@ const DIAG_DIR = process.env.DIAG_DIR || path.join(__dirname, "..", ".diagnostic
 const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 80) * 1024 * 1024;
 const SEARCH_TTL_MS = 30 * 1000;
 const DIAG_LIMIT = 1500;
+const TV_CLIENT_VERSION = "LAB-TV-4.4";
+const AGENT_MIN_VERSION = "0.6.1";
+const PUBLIC_ORIGIN = String(process.env.PUBLIC_ORIGIN || "https://demodj.kitkaraoke.com").replace(/\/$/, "");
 
 const app = express();
 const server = http.createServer(app);
@@ -29,7 +32,17 @@ const io = new Server(server, {
 app.disable("x-powered-by");
 app.use(helmet({ contentSecurityPolicy: false }));
 app.use(express.json({ limit: "256kb" }));
-app.use(express.static(path.join(__dirname, "..", "public")));
+app.use(express.static(path.join(__dirname, "..", "public"), {
+  etag: false,
+  maxAge: 0,
+  setHeaders(res, filePath) {
+    if (/\.(?:html|js|css)$/i.test(filePath)) {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    }
+  }
+}));
 
 const rooms = new Map();
 const agents = new Map();
@@ -323,11 +336,16 @@ function createMediaJob(room, media, duration) {
     },
     duration: [30, 45, 60].includes(Number(duration)) ? Number(duration) : 45,
     expected: kinds,
-    optional: String(media.format || "").toUpperCase() === "CDG" &&
-      normalizeCdgBackground(media.cdgBackground || room.settings.cdgBackground) === "youtube-auto"
-      ? ["background"]
-      : [],
+    // El fondo YouTube siempre es una pieza opcional para CDG. Así puede
+    // activarse en vivo después de preparar el karaoke sin rehacer CDG/audio.
+    optional: String(media.format || "").toUpperCase() === "CDG" ? ["background"] : [],
     backgroundMeta: null,
+    backgroundState: String(media.format || "").toUpperCase() === "CDG" &&
+      normalizeCdgBackground(media.cdgBackground || room.settings.cdgBackground) === "youtube-auto"
+      ? "preparing"
+      : "idle",
+    backgroundLastAttemptAt: 0,
+    origin: PUBLIC_ORIGIN,
     files: {},
     uploadToken,
     mediaToken,
@@ -421,6 +439,49 @@ function sendPreparedMedia(job) {
   return true;
 }
 
+function requestYoutubeBackground(job, room, reason = "panel-live") {
+  if (!job || !room || job.media.format !== "CDG") return false;
+  if (job.files.background || job.backgroundState === "ready" || job.backgroundState === "uploaded") {
+    return false;
+  }
+  if (job.backgroundState === "requested" || job.backgroundState === "preparing") {
+    return false;
+  }
+  const agent = job.agentCode ? agents.get(job.agentCode) : null;
+  if (!agent) {
+    job.backgroundState = "failed";
+    diag(job.roomCode, "OVH", "YOUTUBE_BACKGROUND_REQUEST_SKIPPED", {
+      reason: "AGENT_OFFLINE",
+      requestedBy: reason
+    }, job.traceId, "warn");
+    return false;
+  }
+
+  if (!job.optional.includes("background")) job.optional.push("background");
+  job.media.youtubeBackground = true;
+  job.media.cdgBackground = "youtube-auto";
+  job.backgroundState = "requested";
+  job.backgroundLastAttemptAt = Date.now();
+  const origin = job.origin || PUBLIC_ORIGIN;
+
+  io.to(agent.socketId).emit("agent:background:prepare", {
+    traceId: job.traceId,
+    roomCode: job.roomCode,
+    media: job.media,
+    duration: job.duration,
+    uploadToken: job.uploadToken,
+    uploadUrl: origin + uploadUrl(job.traceId, "background"),
+    reason
+  });
+  diag(job.roomCode, "OVH", "YOUTUBE_BACKGROUND_LIVE_REQUEST_SENT", {
+    requestedBy: reason,
+    agentCode: job.agentCode,
+    jobStatus: job.status,
+    nonBlocking: true
+  }, job.traceId);
+  return true;
+}
+
 app.get("/health", (_req, res) => {
   res.json({
     ok: true,
@@ -456,6 +517,7 @@ app.get("/api/status", (_req, res) => {
       expected: job.expected,
       optional: job.optional || [],
       backgroundMeta: job.backgroundMeta || null,
+      backgroundState: job.backgroundState || "idle",
       files: Object.fromEntries(Object.entries(job.files).map(([k, v]) => [k, { size: v.size }])),
       createdAt: job.createdAt,
       expiresAt: job.expiresAt
@@ -508,6 +570,7 @@ app.put("/api/upload/:traceId/:kind", async (req, res) => {
     }, traceId);
 
     if (kind === "background") {
+      job.backgroundState = "uploaded";
       const room = rooms.get(job.roomCode);
       if (room && room.playback.traceId === traceId && room.playback.media) {
         room.playback.media.urls = {
@@ -586,18 +649,31 @@ app.get("/media/:traceId/:kind", async (req, res) => {
   return fs.createReadStream(item.file, { start, end }).pipe(res);
 });
 
-app.get("/dj", (_req, res) => {
-  res.sendFile(path.join(__dirname, "..", "public", "dj.html"));
+function sendNoStoreHtml(res, file) {
+  res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  res.sendFile(path.join(__dirname, "..", "public", file));
+}
+
+app.get("/api/client-version", (_req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  res.json({
+    ok: true,
+    tv: TV_CLIENT_VERSION,
+    agent: AGENT_MIN_VERSION,
+    phase: 4
+  });
 });
 
-app.get("/tv", (_req, res) => {
-  res.sendFile(path.join(__dirname, "..", "public", "tv.html"));
-});
+app.get("/dj", (_req, res) => sendNoStoreHtml(res, "dj.html"));
+
+app.get("/tv", (_req, res) => sendNoStoreHtml(res, "tv.html"));
 
 app.get("/", (req, res) => {
   const host = String(req.hostname || "").toLowerCase();
   const file = host.startsWith("demotv.") ? "tv.html" : "dj.html";
-  res.sendFile(path.join(__dirname, "..", "public", file));
+  sendNoStoreHtml(res, file);
 });
 
 io.on("connection", (socket) => {
@@ -634,13 +710,23 @@ io.on("connection", (socket) => {
     else room.tvSocketIds.add(socket.id);
     touch(room);
 
+    const clientVersion = String(payload.clientVersion || "").slice(0, 40);
     diag(code, role.toUpperCase(), "ROOM_JOINED", {
       socketId: socket.id,
       tvCount: room.tvSocketIds.size,
       transportMode: String(payload.transportMode || "SOCKET_IO").slice(0, 40),
       reconnect: Boolean(payload.reconnect),
-      clientVersion: String(payload.clientVersion || "").slice(0, 40)
+      clientVersion
     }, room.playback.traceId);
+
+    if (role === "tv" && clientVersion && clientVersion !== TV_CLIENT_VERSION) {
+      diag(code, "TV", "TV_CLIENT_STALE", {
+        socketId: socket.id,
+        clientVersion,
+        expectedVersion: TV_CLIENT_VERSION,
+        cachePolicy: "NO_STORE"
+      }, room.playback.traceId, "warn");
+    }
 
     emitRoomState(room);
     ack({ ok: true, room: publicRoomState(room) });
@@ -874,7 +960,8 @@ io.on("connection", (socket) => {
 
     const origin = String(payload.origin || "").startsWith("https://")
       ? String(payload.origin).replace(/\/$/, "")
-      : "https://demodj.kitkaraoke.com";
+      : PUBLIC_ORIGIN;
+    job.origin = origin;
 
     const previousJobForCancel = previousTraceId ? mediaJobs.get(previousTraceId) : null;
     if (
@@ -936,6 +1023,8 @@ io.on("connection", (socket) => {
       return ack({ ok: false, error: "BACKGROUND_JOB_INVALID" });
     }
     job.backgroundMeta = safeYoutubeBackgroundMeta(payload.background || {});
+    job.backgroundState = "ready";
+    job.media.youtubeBackground = true;
     job.media.youtubeBackgroundMeta = job.backgroundMeta;
     job.updatedAt = Date.now();
     job.expiresAt = Date.now() + MEDIA_TTL_MS;
@@ -964,6 +1053,22 @@ io.on("connection", (socket) => {
       }
       emitRoomState(room);
     }
+    ack({ ok: true });
+  });
+
+  socket.on("agent:background:error", (payload = {}, ack = () => {}) => {
+    const traceId = String(payload.traceId || "");
+    const job = mediaJobs.get(traceId);
+    if (!job || socket.data.role !== "agent" || socket.data.agentCode !== job.agentCode) {
+      return ack({ ok: false, error: "BACKGROUND_JOB_INVALID" });
+    }
+    job.backgroundState = "failed";
+    job.updatedAt = Date.now();
+    diag(job.roomCode, "AGENT", "YOUTUBE_BACKGROUND_ERROR", {
+      error: String(payload.error || "Unknown background error").slice(-1200),
+      retryable: payload.retryable !== false,
+      karaokeContinues: true
+    }, traceId, "warn");
     ack({ ok: true });
   });
 
@@ -1045,6 +1150,7 @@ io.on("connection", (socket) => {
     const room = rooms.get(socket.data.roomCode);
     if (!room || socket.data.role !== "dj") return ack({ ok: false, error: "DJ_ROOM_REQUIRED" });
 
+    const previous = { ...room.settings };
     const next = {
       cdgQuality: payload.cdgQuality == null ? room.settings.cdgQuality : normalizeCdgQuality(payload.cdgQuality),
       cdgBackground: payload.cdgBackground == null ? room.settings.cdgBackground : normalizeCdgBackground(payload.cdgBackground),
@@ -1061,6 +1167,26 @@ io.on("connection", (socket) => {
       room.playback.media.backgroundQuality = next.backgroundQuality;
       room.playback.media.youtubeBlur = next.youtubeBlur;
       room.playback.media.youtubeShade = next.youtubeShade;
+      room.playback.media.youtubeBackground = next.cdgBackground === "youtube-auto";
+    }
+
+    const currentJob = room.playback.traceId ? mediaJobs.get(room.playback.traceId) : null;
+    const explicitlySelectedYoutube = payload.cdgBackground != null &&
+      normalizeCdgBackground(payload.cdgBackground) === "youtube-auto";
+    if (
+      explicitlySelectedYoutube &&
+      currentJob &&
+      currentJob.media.format === "CDG" &&
+      !currentJob.files.background
+    ) {
+      // Permite que un karaoke preparado con Negro/Ondas/etc. solicite YouTube
+      // en vivo sin rehacer el CDG ni bloquear la reproducción.
+      if (currentJob.backgroundState === "failed") currentJob.backgroundState = "idle";
+      requestYoutubeBackground(
+        currentJob,
+        room,
+        previous.cdgBackground === "youtube-auto" ? "panel-retry" : "panel-live-switch"
+      );
     }
 
     touch(room);
