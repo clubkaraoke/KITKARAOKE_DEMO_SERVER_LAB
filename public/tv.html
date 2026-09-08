@@ -35,6 +35,8 @@
 
       <div class="screen tv-screen" id="screen">
         <canvas id="bgCanvas" class="tv-bg hidden" aria-label="Fondo animado CDG"></canvas>
+        <video id="youtubeBgVideo" class="tv-youtube-bg hidden" muted loop playsinline preload="auto" aria-label="Videoclip YouTube de fondo"></video>
+        <div id="youtubeBgShade" class="tv-youtube-shade hidden" aria-hidden="true"></div>
         <canvas id="cdgCanvas" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG ORIGINAL"></canvas>
         <canvas id="cdgCanvasHD" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG SDF LAB V2"></canvas>
         <canvas id="sdfProCanvas" class="tv-cdg tv-cdg-quality hidden" aria-label="CDG SDF KARAOKE PRO"></canvas>
@@ -84,7 +86,7 @@
   <script src="/sdf-karaoke-pro-renderer.js"></script>
   <script src="/cdg-engine-lite.js"></script>
   <script>
-    const TV_CLIENT_VERSION = "LAB-TV-4.2";
+    const TV_CLIENT_VERSION = "LAB-TV-4.3";
     const TRANSPORT_MODE = "HTTP_PRELOAD";
     const socket = io({
       reconnection: true,
@@ -97,6 +99,8 @@
 
     const audio = el("audio");
     const video = el("video");
+    const youtubeBgVideo = el("youtubeBgVideo");
+    const youtubeBgShade = el("youtubeBgShade");
     const bgCanvas = el("bgCanvas");
     const bgCtx = bgCanvas.getContext("2d", { alpha: false });
     const cdgCanvas = el("cdgCanvas");
@@ -113,7 +117,8 @@
       "waves": "ONDAS",
       "glow": "GLOW",
       "gradient": "GRADIENTE",
-      "particles": "PARTÍCULAS"
+      "particles": "PARTÍCULAS",
+      "youtube-auto": "YOUTUBE AUTO"
     };
     const BG_QUALITY = {
       light: { fps: 20, scale: 0.50, particles: 24 },
@@ -164,6 +169,12 @@
     let lastLoadSentAt = 0;
     let audioBlobUrl = null;
     let videoBlobUrl = null;
+    let youtubeBgBlobUrl = null;
+    let youtubeBackgroundReady = false;
+    let youtubeBackgroundMeta = null;
+    let youtubeBlur = 14;
+    let youtubeShade = 55;
+    let youtubeBackgroundLoadSeq = 0;
     let animationId = 0;
     let lastSyncLogAt = 0;
     let rebufferCount = 0;
@@ -242,6 +253,14 @@
     function normalizeVideoQuality(value) {
       const mode = String(value || "").trim().toLowerCase();
       return Object.prototype.hasOwnProperty.call(VIDEO_HEIGHTS, mode) ? mode : "auto";
+    }
+    function normalizeYoutubeBlur(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(0, Math.min(30, Math.round(n))) : 14;
+    }
+    function normalizeYoutubeShade(value) {
+      const n = Number(value);
+      return Number.isFinite(n) ? Math.max(0, Math.min(85, Math.round(n))) : 55;
     }
 
     function safeGpuInfo(renderer) {
@@ -453,7 +472,7 @@
       const hue = (220 + now * 0.006) % 360;
       const started = performance.now();
 
-      if (backgroundMode === "black") {
+      if (backgroundMode === "black" || backgroundMode === "youtube-auto") {
         bgCtx.fillStyle = "#000";
         bgCtx.fillRect(0, 0, w, h);
       } else if (backgroundMode === "waves") {
@@ -570,7 +589,7 @@
         displayRafWindowAt = now;
       }
 
-      if (!cdgMode || backgroundMode === "black" || document.hidden) {
+      if (!cdgMode || backgroundMode === "black" || backgroundMode === "youtube-auto" || document.hidden) {
         bgAnimationId = requestAnimationFrame(backgroundLoop);
         return;
       }
@@ -586,7 +605,7 @@
     function startBackground() {
       if (!bgAnimationId) bgAnimationId = requestAnimationFrame(backgroundLoop);
       resizeBackground();
-      if (backgroundMode === "black") drawBackground(performance.now());
+      if (backgroundMode === "black" || backgroundMode === "youtube-auto") drawBackground(performance.now());
     }
 
     function downgradeBackgroundQuality() {
@@ -608,6 +627,31 @@
       }, "warn");
     }
 
+    function applyYoutubeBackgroundStyle() {
+      youtubeBgVideo.style.filter = "blur(" + youtubeBlur + "px)";
+      youtubeBgVideo.style.transform = youtubeBlur > 0 ? "scale(1.055)" : "scale(1)";
+      youtubeBgShade.style.background = "rgba(0,0,0," + (youtubeShade / 100).toFixed(2) + ")";
+    }
+
+    function updateBackgroundVisibility() {
+      const activeCdg = cdgMode && currentMedia;
+      const useYoutube = Boolean(
+        activeCdg &&
+        backgroundMode === "youtube-auto" &&
+        youtubeBackgroundReady &&
+        youtubeBgBlobUrl
+      );
+      youtubeBgVideo.classList.toggle("hidden", !useYoutube);
+      youtubeBgShade.classList.toggle("hidden", !useYoutube);
+      bgCanvas.classList.toggle("hidden", !activeCdg || useYoutube);
+      if (activeCdg && !useYoutube && backgroundMode === "youtube-auto") {
+        drawBackground(performance.now());
+      }
+      if (!useYoutube) {
+        try { youtubeBgVideo.pause(); } catch (_) {}
+      }
+    }
+
     function applyBackground(mode, quality, source) {
       const nextMode = normalizeBg(mode);
       const nextRequestedQuality = normalizeBgQuality(quality);
@@ -623,10 +667,10 @@
       bgLastDrawAt = 0;
       resizeBackground();
       if (cdgMode) {
-        bgCanvas.classList.remove("hidden");
         startBackground();
-        if (backgroundMode === "black") drawBackground(performance.now());
+        if (backgroundMode === "black" || backgroundMode === "youtube-auto") drawBackground(performance.now());
       }
+      updateBackgroundVisibility();
       if (sdfLabRenderer && sdfLabRenderer.setParams) sdfLabRenderer.setParams({ transparentBackground: true });
       if (sdfProRenderer && sdfProRenderer.setParams) sdfProRenderer.setParams({ transparentBackground: true });
       cdgEngine.setTransparentBackground(true);
@@ -635,6 +679,9 @@
           state: playbackStateForDiagnostic(),
           backgroundMode,
           backgroundQuality: requestedBackgroundQuality,
+          youtubeBackgroundReady,
+          youtubeBlur,
+          youtubeShade,
           source
         });
       }
@@ -643,7 +690,7 @@
     function setVisible(kind) {
       const isCdg = kind === "cdg";
       const isVideo = kind === "video";
-      bgCanvas.classList.toggle("hidden", !isCdg);
+      updateBackgroundVisibility();
       cdgCanvas.classList.toggle("hidden", !isCdg || activeCdgQuality !== "original");
       cdgCanvasHD.classList.toggle("hidden", !isCdg || activeCdgQuality !== "sdf-lab-v2");
       sdfProCanvas.classList.toggle("hidden", !isCdg || activeCdgQuality !== "sdf-karaoke-pro");
@@ -687,8 +734,19 @@
     function clearObjectUrls() {
       if (audioBlobUrl) URL.revokeObjectURL(audioBlobUrl);
       if (videoBlobUrl) URL.revokeObjectURL(videoBlobUrl);
+      if (youtubeBgBlobUrl) URL.revokeObjectURL(youtubeBgBlobUrl);
       audioBlobUrl = null;
       videoBlobUrl = null;
+      youtubeBgBlobUrl = null;
+      youtubeBackgroundReady = false;
+      youtubeBackgroundMeta = null;
+      youtubeBackgroundLoadSeq += 1;
+      try {
+        youtubeBgVideo.pause();
+        youtubeBgVideo.removeAttribute("src");
+        youtubeBgVideo.load();
+      } catch (_) {}
+      updateBackgroundVisibility();
     }
 
     function stopLoop() {
@@ -699,6 +757,14 @@
     function syncLoop(ts) {
       if (!cdgMode || !mediaReady) return;
       const sync = cdgEngine.sync(audio.currentTime);
+      if (
+        backgroundMode === "youtube-auto" &&
+        youtubeBackgroundReady &&
+        !youtubeBgVideo.paused &&
+        Math.abs(Number(youtubeBgVideo.currentTime || 0) - Number(audio.currentTime || 0)) > 0.35
+      ) {
+        try { youtubeBgVideo.currentTime = Math.max(0, Number(audio.currentTime || 0)); } catch (_) {}
+      }
       if (ts - lastSyncLogAt >= 2000) {
         lastSyncLogAt = ts;
         report("TV_SYNC_SAMPLE", {
@@ -709,6 +775,12 @@
           cdgQuality: activeCdgQuality,
           cdgBackground: backgroundMode,
           backgroundQuality: activeBackgroundQuality,
+          youtubeBackgroundReady,
+          youtubeBackgroundPlaying: youtubeBackgroundReady ? !youtubeBgVideo.paused : false,
+          youtubeBackgroundTime: youtubeBackgroundReady ? Number((youtubeBgVideo.currentTime || 0).toFixed(3)) : null,
+          youtubeVideoId: youtubeBackgroundMeta?.youtubeId || null,
+          youtubeBlur,
+          youtubeShade,
           bufferedSeconds: Number.isFinite(audio.duration) ? Number(audio.duration.toFixed(2)) : null
         });
       }
@@ -759,6 +831,16 @@
         },
         frameMetrics: { ...frameMetrics },
         backgroundMetrics: { ...backgroundMetrics },
+        youtubeBackground: {
+          ready: youtubeBackgroundReady,
+          playing: youtubeBackgroundReady ? !youtubeBgVideo.paused : false,
+          currentTime: youtubeBackgroundReady ? Number(youtubeBgVideo.currentTime || 0) : null,
+          width: youtubeBgVideo.videoWidth || 0,
+          height: youtubeBgVideo.videoHeight || 0,
+          blur: youtubeBlur,
+          shade: youtubeShade,
+          meta: youtubeBackgroundMeta
+        },
         transport: { ...transportMetrics }
       };
     }
@@ -796,6 +878,10 @@
           cdgBackground: backgroundMode,
           backgroundQuality: activeBackgroundQuality,
           videoQuality: currentMedia.videoQuality || null,
+          youtubeBackgroundReady,
+          youtubeBlur,
+          youtubeShade,
+          youtubeBackgroundMeta,
           transport: currentMedia.transport || TRANSPORT_MODE
         } : null,
         rebufferCount,
@@ -924,6 +1010,63 @@
       });
     }
 
+    async function loadYoutubeBackground(url, seq, meta, source) {
+      if (!url || !cdgMode || backgroundMode !== "youtube-auto") return false;
+      const bgSeq = ++youtubeBackgroundLoadSeq;
+      report("TV_YOUTUBE_BACKGROUND_PRELOAD_START", {
+        state: mediaReady ? playbackStateForDiagnostic() : "preloading",
+        source: source || "load",
+        youtubeVideoId: meta?.youtubeId || null,
+        youtubeBlur,
+        youtubeShade
+      });
+      try {
+        const result = await fetchFull(url, "youtube_background", "blob");
+        if (seq !== loadSeq || bgSeq !== youtubeBackgroundLoadSeq || !cdgMode) return false;
+        if (youtubeBgBlobUrl) URL.revokeObjectURL(youtubeBgBlobUrl);
+        youtubeBgBlobUrl = URL.createObjectURL(result.payload);
+        youtubeBgVideo.src = youtubeBgBlobUrl;
+        youtubeBgVideo.muted = true;
+        youtubeBgVideo.loop = true;
+        youtubeBgVideo.volume = 0;
+        await waitMediaReady(youtubeBgVideo);
+        if (seq !== loadSeq || bgSeq !== youtubeBackgroundLoadSeq || !cdgMode) return false;
+        youtubeBgVideo.currentTime = Math.max(0, Number(audio.currentTime || 0));
+        youtubeBackgroundReady = true;
+        youtubeBackgroundMeta = meta || currentMedia?.youtubeBackgroundMeta || null;
+        applyYoutubeBackgroundStyle();
+        updateBackgroundVisibility();
+        if (mediaReady && !audio.paused) {
+          try { await youtubeBgVideo.play(); } catch (_) {}
+        }
+        report("TV_YOUTUBE_BACKGROUND_READY", {
+          state: mediaReady ? playbackStateForDiagnostic() : "preloading",
+          bytes: result.bytes,
+          elapsedMs: result.elapsedMs,
+          videoWidth: youtubeBgVideo.videoWidth,
+          videoHeight: youtubeBgVideo.videoHeight,
+          youtubeBackgroundReady: true,
+          youtubeVideoId: youtubeBackgroundMeta?.youtubeId || null,
+          youtubeBlur,
+          youtubeShade,
+          source: source || "load"
+        });
+        return true;
+      } catch (error) {
+        if (error.name === "AbortError") return false;
+        youtubeBackgroundReady = false;
+        updateBackgroundVisibility();
+        report("TV_YOUTUBE_BACKGROUND_FALLBACK", {
+          state: mediaReady ? playbackStateForDiagnostic() : "preloading",
+          error: String(error.message || error),
+          fallback: "GENERATED_BACKGROUND",
+          karaokeContinues: true,
+          source: source || "load"
+        }, "warn");
+        return false;
+      }
+    }
+
     async function loadCdg(media, seq) {
       const started = performance.now();
       const [cdgResult, audioResult] = await Promise.all([
@@ -1010,6 +1153,9 @@
       cdgMode = String(media.format).toUpperCase() === "CDG";
       rebufferCount = 0;
       resetPlaybackMetrics();
+      youtubeBlur = normalizeYoutubeBlur(media.youtubeBlur ?? youtubeBlur);
+      youtubeShade = normalizeYoutubeShade(media.youtubeShade ?? youtubeShade);
+      applyYoutubeBackgroundStyle();
 
       if (cdgMode) {
         applyBackground(media.cdgBackground || "black", media.backgroundQuality || "normal", "media-load");
@@ -1040,6 +1186,14 @@
       });
 
       try {
+        if (cdgMode && media.urls.background && backgroundMode === "youtube-auto") {
+          loadYoutubeBackground(
+            media.urls.background,
+            seq,
+            media.youtubeBackgroundMeta || null,
+            "initial-media"
+          ).catch(() => {});
+        }
         const result = cdgMode ? await loadCdg(media, seq) : await loadVideo(media, seq);
         if (seq !== loadSeq) return;
         mediaReady = true;
@@ -1143,6 +1297,11 @@
       try {
         if (cdgMode) {
           await audio.play();
+          if (backgroundMode === "youtube-auto" && youtubeBackgroundReady) {
+            youtubeBgVideo.muted = true;
+            try { youtubeBgVideo.currentTime = Math.max(0, Number(audio.currentTime || 0)); } catch (_) {}
+            try { await youtubeBgVideo.play(); } catch (_) {}
+          }
           startLoop();
           startBackground();
         } else {
@@ -1172,6 +1331,7 @@
     function pauseCurrent() {
       if (cdgMode) {
         audio.pause();
+        try { youtubeBgVideo.pause(); } catch (_) {}
         cdgEngine.sync(audio.currentTime);
       } else {
         video.pause();
@@ -1189,6 +1349,10 @@
       if (cdgMode) {
         audio.pause();
         audio.currentTime = 0;
+        try {
+          youtubeBgVideo.pause();
+          youtubeBgVideo.currentTime = 0;
+        } catch (_) {}
         cdgEngine.sync(0);
       } else {
         video.pause();
@@ -1204,6 +1368,9 @@
       const target = Math.max(0, Number(position || 0));
       if (cdgMode) {
         audio.currentTime = target;
+        if (youtubeBackgroundReady) {
+          try { youtubeBgVideo.currentTime = target; } catch (_) {}
+        }
         cdgEngine.sync(target);
       } else {
         video.currentTime = target;
@@ -1219,6 +1386,20 @@
       const nextQuality = normalizeQuality(settings.cdgQuality || requestedCdgQuality);
       const nextBg = normalizeBg(settings.cdgBackground || backgroundMode);
       const nextBgQuality = normalizeBgQuality(settings.backgroundQuality || requestedBackgroundQuality);
+      const nextYoutubeBlur = normalizeYoutubeBlur(settings.youtubeBlur ?? youtubeBlur);
+      const nextYoutubeShade = normalizeYoutubeShade(settings.youtubeShade ?? youtubeShade);
+      const youtubeStyleChanged = nextYoutubeBlur !== youtubeBlur || nextYoutubeShade !== youtubeShade;
+      youtubeBlur = nextYoutubeBlur;
+      youtubeShade = nextYoutubeShade;
+      if (youtubeStyleChanged) {
+        applyYoutubeBackgroundStyle();
+        report("TV_YOUTUBE_BACKGROUND_STYLE", {
+          state: playbackStateForDiagnostic(),
+          youtubeBlur,
+          youtubeShade,
+          source: source || "live-settings"
+        });
+      }
       if (cdgMode || String(currentMedia?.format || "").toUpperCase() === "CDG") {
         const visualChanged =
           nextQuality !== requestedCdgQuality ||
@@ -1485,6 +1666,21 @@
       applyPlayerSettings(event.settings || {}, "panel-live");
     });
 
+    socket.on("player:background", (event) => {
+      if (!event || !event.url) return;
+      if (event.traceId && currentTraceId && event.traceId !== currentTraceId) return;
+      if (!cdgMode || backgroundMode !== "youtube-auto") return;
+      youtubeBlur = normalizeYoutubeBlur(event.blur ?? youtubeBlur);
+      youtubeShade = normalizeYoutubeShade(event.shade ?? youtubeShade);
+      applyYoutubeBackgroundStyle();
+      loadYoutubeBackground(
+        event.url,
+        loadSeq,
+        event.meta || currentMedia?.youtubeBackgroundMeta || null,
+        "async-agent"
+      ).catch(() => {});
+    });
+
     socket.on("player:command", async (event) => {
       const command = String(event.command || "").toUpperCase();
       if (command === "LOAD" && event.media) {
@@ -1556,6 +1752,12 @@
         cdgQuality: cdgMode ? activeCdgQuality : null,
         cdgBackground: cdgMode ? backgroundMode : null,
         backgroundQuality: cdgMode ? activeBackgroundQuality : null,
+        youtubeBackgroundReady: cdgMode ? youtubeBackgroundReady : null,
+        youtubeBackgroundPlaying: cdgMode && youtubeBackgroundReady ? !youtubeBgVideo.paused : null,
+        youtubeBackgroundTime: cdgMode && youtubeBackgroundReady ? Number(youtubeBgVideo.currentTime || 0) : null,
+        youtubeVideoId: cdgMode ? (youtubeBackgroundMeta?.youtubeId || null) : null,
+        youtubeBlur: cdgMode ? youtubeBlur : null,
+        youtubeShade: cdgMode ? youtubeShade : null,
         videoQuality: cdgMode ? null : normalizeVideoQuality(currentMedia?.videoQuality || "auto"),
         videoWidth: cdgMode ? null : video.videoWidth,
         videoHeight: cdgMode ? null : video.videoHeight,
