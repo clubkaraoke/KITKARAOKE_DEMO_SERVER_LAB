@@ -18,7 +18,7 @@ jobs:
       - name: Validate agent
         run: |
           python3 -m py_compile agent/windows/agent.py
-          grep -q 'APP_VERSION = "0.6.0"' agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.6.1"' agent/windows/agent.py
           grep -q 'AGENT_PREPARE_COMPLETE' agent/windows/agent.py
           grep -q 'AGENT_VIDEO_SOURCE_PROBED' agent/windows/agent.py
           grep -q 'AUTO_UPSCALE_GUARD' agent/windows/agent.py
@@ -27,11 +27,14 @@ jobs:
           grep -q 'youtubeBackgroundNonBlocking' agent/windows/agent.py
           grep -q '^yt-dlp\[default\]' agent/windows/requirements.txt
           grep -q 'bundled_deno' agent/windows/agent.py
+          grep -q 'communicate(timeout=min(0.35, remaining))' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_QUERY_NORMALIZED' agent/windows/agent.py
+          grep -q 'agent:background:prepare' agent/windows/agent.py
 
       - name: Build ZIP
         run: |
           set -euo pipefail
-          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
+          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.1
           mkdir -p "$ROOT/engine"
           cp agent/windows/agent.py "$ROOT/"
           cp agent/windows/requirements.txt "$ROOT/"
@@ -46,12 +49,12 @@ jobs:
           test -s "$ROOT/engine/deno.exe"
 
           cd dist
-          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
+          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.1.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.1
 
       - name: Upload ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
-          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip
+          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.1
+          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.1.zip
           if-no-files-found: error
           retention-days: 14
