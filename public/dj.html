@@ -11,7 +11,7 @@
     <div class="topbar">
       <div>
         <div class="brand">KITKARAOKE · DEMO SERVER LAB</div>
-        <div class="muted">Panel DJ — Fase 4 · fondos CDG + calidad de video + diagnóstico avanzado</div>
+        <div class="muted">Panel DJ — Fase 4.5 · fondos CDG inteligentes + YouTube AUTO + diagnóstico avanzado</div>
       </div>
       <div class="badge"><span id="dot" class="dot"></span><span id="connection">Conectando…</span></div>
     </div>
@@ -55,6 +55,16 @@
             <button type="button" class="quality-btn" data-quality="sdf-karaoke-pro">SDF KARAOKE PRO</button>
           </div>
           <div id="cdgQualityNote" class="inline-note">ORIGINAL · render CDG clásico, máxima compatibilidad.</div>
+        </div>
+
+        <div class="quality-control">
+          <div class="kicker">Transparencia CDG</div>
+          <div class="quality-switch" id="cdgTransparencySwitch">
+            <button type="button" class="quality-btn active" data-transparency="auto">AUTO INTELIGENTE</button>
+            <button type="button" class="quality-btn" data-transparency="original">RESPETAR ORIGINAL</button>
+            <button type="button" class="quality-btn" data-transparency="force">FORZAR</button>
+          </div>
+          <div id="cdgTransparencyNote" class="inline-note">AUTO INTELIGENTE · detecta fondos propios del CDG conectados al borde y los vuelve transparentes sin borrar letras interiores.</div>
         </div>
 
         <div class="quality-control">
@@ -187,6 +197,7 @@
     let currentRoomState = null;
     let selectedCdgQuality = localStorage.getItem("kitkaraoke-cdg-quality") || "original";
     let selectedCdgBackground = localStorage.getItem("kitkaraoke-cdg-background") || "black";
+    let selectedCdgTransparency = localStorage.getItem("kitkaraoke-cdg-transparency") || "auto";
     let selectedBackgroundQuality = localStorage.getItem("kitkaraoke-bg-quality") || "normal";
     let selectedVideoQuality = localStorage.getItem("kitkaraoke-video-quality") || "auto";
     let selectedYoutubeBlur = Math.max(0, Math.min(30, Number(localStorage.getItem("kitkaraoke-youtube-blur") || 14)));
@@ -287,7 +298,9 @@
           " · CDG→AAC: " + (caps.cdgAacDemo ? "LISTO" : "NO") +
           " · MP4 H.264: " + (caps.mp4H264Demo ? "LISTO" : "NO") +
           " · Video: " + (Array.isArray(caps.videoQualities) ? caps.videoQualities.join("/") : "auto/360/540/720") +
-          " · YouTube AUTO: " + (caps.youtubeBackgroundAuto ? "LISTO" : "NO");
+          " · YouTube AUTO: " + (caps.youtubeBackgroundAuto ? "LISTO" : "NO") +
+          " · YouTube rápido: " + (caps.youtubeFastPrepare ? "LISTO" : "NO") +
+          " · Audio: " + String(caps.audioAacBitrate || "192k").toUpperCase();
         el("searchNote").textContent = "PC conectado. Escribe artista o título.";
       } else {
         el("agentInfo").textContent = agent
@@ -308,6 +321,11 @@
       "sdf-lab-v2": "SDF LAB V2 · suavizado SDF con halo, corte, gamma y escala 8×.",
       "sdf-karaoke-pro": "SDF KARAOKE PRO · SDF avanzado con gradiente, contorno y sombra."
     };
+    const TRANSPARENCY_NOTES = {
+      auto: "AUTO INTELIGENTE · detecta fondos propios del CDG conectados al borde y los vuelve transparentes sin borrar letras interiores.",
+      original: "RESPETAR ORIGINAL · conserva exactamente el fondo que trae el CDG. Úsalo si un archivo especial se ve mejor sin transparencia.",
+      force: "FORZAR · elimina regiones de fondo más pequeñas/agresivas. Úsalo solo si AUTO deja paneles o colores del CDG."
+    };
     const BG_LABELS = {
       black: "NEGRO",
       waves: "ONDAS",
@@ -322,12 +340,12 @@
       glow: "GLOW · luces difusas en movimiento, estilo escenario.",
       gradient: "GRADIENTE · color profundo animado, ligero y continuo.",
       particles: "PARTÍCULAS · puntos luminosos suaves sobre fondo oscuro.",
-      "youtube-auto": "YOUTUBE AUTO · busca videoclip oficial primero; si no, usa la mejor coincidencia por visualizaciones. El video va mudo detrás del CDG."
+      "youtube-auto": "YOUTUBE AUTO · prioriza videoclip oficial y descarta karaoke/cover/reaction. El video va mudo detrás del CDG; si falla, el karaoke continúa."
     };
     const BG_QUALITY_NOTES = {
-      light: "LIGERO · 20 FPS y menor resolución interna para TVs de entrada.",
-      normal: "NORMAL · equilibrio entre fluidez y calidad visual.",
-      premium: "PREMIUM · hasta 60 FPS; la TV puede bajar automáticamente si detecta carga."
+      light: "LIGERO · fondo generado ligero; YouTube AUTO prepara hasta 360p.",
+      normal: "NORMAL · equilibrio recomendado; YouTube AUTO prepara hasta 540p.",
+      premium: "PREMIUM · máxima calidad visual; YouTube AUTO prepara hasta 720p y la TV puede degradar fondos generados si detecta carga."
     };
     const VIDEO_QUALITY_NOTES = {
       auto: "AUTO · detecta la fuente, evita upscale y limita a 720p; se aplica al próximo demo de video.",
@@ -353,6 +371,18 @@
       el("cdgQualityNote").textContent = QUALITY_NOTES[mode];
       if (notify) emitPlayerSettings({ cdgQuality: mode });
       simpleLog("Calidad CDG seleccionada", { mode, label: QUALITY_LABELS[mode] });
+    }
+
+    function setCdgTransparency(mode, notify = true) {
+      if (!TRANSPARENCY_NOTES[mode]) mode = "auto";
+      selectedCdgTransparency = mode;
+      localStorage.setItem("kitkaraoke-cdg-transparency", mode);
+      document.querySelectorAll("#cdgTransparencySwitch .quality-btn").forEach((button) => {
+        button.classList.toggle("active", button.dataset.transparency === mode);
+      });
+      el("cdgTransparencyNote").textContent = TRANSPARENCY_NOTES[mode];
+      if (notify) emitPlayerSettings({ cdgTransparencyMode: mode });
+      simpleLog("Transparencia CDG seleccionada", { mode });
     }
 
     function setCdgBackground(mode, notify = true) {
@@ -409,6 +439,9 @@
     document.querySelectorAll("#cdgQualitySwitch .quality-btn").forEach((button) => {
       button.addEventListener("click", () => setCdgQuality(button.dataset.quality));
     });
+    document.querySelectorAll("#cdgTransparencySwitch .quality-btn").forEach((button) => {
+      button.addEventListener("click", () => setCdgTransparency(button.dataset.transparency));
+    });
     document.querySelectorAll("#cdgBackgroundSwitch .quality-btn").forEach((button) => {
       button.addEventListener("click", () => setCdgBackground(button.dataset.bg));
     });
@@ -426,6 +459,7 @@
     });
 
     setCdgQuality(selectedCdgQuality, false);
+    setCdgTransparency(selectedCdgTransparency, false);
     setCdgBackground(selectedCdgBackground, false);
     setBackgroundQuality(selectedBackgroundQuality, false);
     setVideoQuality(selectedVideoQuality, false);
@@ -453,6 +487,7 @@
       setAgentState(room.agent || null);
       if (room.settings) {
         setCdgQuality(room.settings.cdgQuality || selectedCdgQuality, false);
+        setCdgTransparency(room.settings.cdgTransparencyMode || selectedCdgTransparency, false);
         setCdgBackground(room.settings.cdgBackground || selectedCdgBackground, false);
         setBackgroundQuality(room.settings.backgroundQuality || selectedBackgroundQuality, false);
         setVideoQuality(room.settings.videoQuality || selectedVideoQuality, false);
@@ -554,6 +589,7 @@
         audio: item.audio || null,
         cdgQuality: String(item.format).toUpperCase() === "CDG" ? selectedCdgQuality : null,
         cdgBackground: String(item.format).toUpperCase() === "CDG" ? selectedCdgBackground : null,
+        cdgTransparencyMode: String(item.format).toUpperCase() === "CDG" ? selectedCdgTransparency : null,
         backgroundQuality: String(item.format).toUpperCase() === "CDG" ? selectedBackgroundQuality : null,
         youtubeBlur: String(item.format).toUpperCase() === "CDG" ? selectedYoutubeBlur : null,
         youtubeShade: String(item.format).toUpperCase() === "CDG" ? selectedYoutubeShade : null,
