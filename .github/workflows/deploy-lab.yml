@@ -1,0 +1,48 @@
+name: Deploy LAB to OVH
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: kitkaraoke-demo-server-lab-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - name: Configure SSH
+        shell: bash
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_PORT: ${{ secrets.OVH_PORT }}
+          OVH_SSH_KEY: ${{ secrets.OVH_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$OVH_HOST"
+          test -n "$OVH_PORT"
+          test -n "$OVH_SSH_KEY"
+          mkdir -p ~/.ssh
+          printf '%s\n' "$OVH_SSH_KEY" > ~/.ssh/id_ovh
+          chmod 600 ~/.ssh/id_ovh
+          ssh-keyscan -p "$OVH_PORT" -H "$OVH_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy current main
+        shell: bash
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_PORT: ${{ secrets.OVH_PORT }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+        run: |
+          set -euo pipefail
+          test -n "$OVH_USER"
+          ssh -i ~/.ssh/id_ovh -p "$OVH_PORT" "$OVH_USER@$OVH_HOST" 'bash -se' <<'REMOTE'
+            set -euo pipefail
+            cd /opt/kitkaraoke-demo-server-lab
+            git fetch origin main
+            git reset --hard origin/main
+            DEMO_HOST_PORT=8796 docker compose up -d --build --remove-orphans
+            docker inspect --format='{{.State.Health.Status}}' kitkaraoke-demo-server-lab
+            curl -fsS http://127.0.0.1:8796/health
+          REMOTE
