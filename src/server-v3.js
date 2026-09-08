@@ -19,7 +19,7 @@ const MAX_UPLOAD_BYTES = Number(process.env.MAX_UPLOAD_MB || 80) * 1024 * 1024;
 const SEARCH_TTL_MS = 30 * 1000;
 const DIAG_LIMIT = 1500;
 const TV_CLIENT_VERSION = "LAB-TV-4.7";
-const AGENT_MIN_VERSION = "0.8.0";
+const AGENT_MIN_VERSION = "0.9.0";
 const PUBLIC_ORIGIN = String(process.env.PUBLIC_ORIGIN || "https://demodj.kitkaraoke.com").replace(/\/$/, "");
 
 const app = express();
@@ -154,7 +154,7 @@ function newRoom(code, djSocketId) {
       cdgBackground: "black",
       cdgTransparencyMode: "auto",
       backgroundQuality: "normal",
-      videoQuality: "auto",
+      videoQuality: "original",
       youtubeBlur: 14,
       youtubeShade: 55
     },
@@ -261,10 +261,8 @@ function normalizeBackgroundQuality(value) {
   return allowed.has(mode) ? mode : "normal";
 }
 
-function normalizeVideoQuality(value) {
-  const mode = String(value || "").trim().toLowerCase();
-  const allowed = new Set(["auto", "360", "540", "720"]);
-  return allowed.has(mode) ? mode : "auto";
+function normalizeVideoQuality(_value) {
+  return "original";
 }
 
 function normalizeYoutubeBlur(value) {

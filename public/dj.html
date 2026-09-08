@@ -94,23 +94,20 @@
 
         <div class="quality-control control-split">
           <div>
-            <div class="kicker">Rendimiento del fondo</div>
+            <div class="kicker">Rendimiento de efectos</div>
             <div class="quality-switch" id="backgroundQualitySwitch">
               <button type="button" class="quality-btn" data-bg-quality="light">LIGERO</button>
               <button type="button" class="quality-btn active" data-bg-quality="normal">NORMAL</button>
               <button type="button" class="quality-btn" data-bg-quality="premium">PREMIUM</button>
             </div>
-            <div id="backgroundQualityNote" class="inline-note">NORMAL · equilibrio entre fluidez y calidad visual.</div>
+            <div id="backgroundQualityNote" class="inline-note">NORMAL · equilibrio para ONDAS, GLOW, GRADIENTE y PARTÍCULAS. No cambia la calidad de YouTube.</div>
           </div>
           <div>
-            <div class="kicker">Calidad de video</div>
-            <div class="quality-switch" id="videoQualitySwitch">
-              <button type="button" class="quality-btn active" data-video-quality="auto">AUTO</button>
-              <button type="button" class="quality-btn" data-video-quality="360">360p</button>
-              <button type="button" class="quality-btn" data-video-quality="540">540p</button>
-              <button type="button" class="quality-btn" data-video-quality="720">720p</button>
+            <div class="kicker">Video MP4 karaoke</div>
+            <div class="quality-switch">
+              <button type="button" class="quality-btn active" disabled>ORIGINAL</button>
             </div>
-            <div id="videoQualityNote" class="inline-note">AUTO · detecta la resolución original, nunca hace upscale y limita el demo a un máximo de 1280×720.</div>
+            <div class="inline-note">Conserva la resolución original del karaoke. Si el video H.264 ya es compatible, se copia sin recodificar.</div>
           </div>
         </div>
 
@@ -200,7 +197,7 @@
     let selectedCdgBackground = localStorage.getItem("kitkaraoke-cdg-background") || "black";
     let selectedCdgTransparency = localStorage.getItem("kitkaraoke-cdg-transparency") || "auto";
     let selectedBackgroundQuality = localStorage.getItem("kitkaraoke-bg-quality") || "normal";
-    let selectedVideoQuality = localStorage.getItem("kitkaraoke-video-quality") || "auto";
+    const selectedVideoQuality = "original";
     let selectedYoutubeBlur = Math.max(0, Math.min(30, Number(localStorage.getItem("kitkaraoke-youtube-blur") || 14)));
     let selectedYoutubeShade = Math.max(0, Math.min(85, Number(localStorage.getItem("kitkaraoke-youtube-shade") || 55)));
 
@@ -341,18 +338,12 @@
       glow: "GLOW · luces difusas en movimiento, estilo escenario.",
       gradient: "GRADIENTE · color profundo animado, ligero y continuo.",
       particles: "PARTÍCULAS · puntos luminosos suaves sobre fondo oscuro.",
-      "youtube-auto": "YOUTUBE AUTO · prioriza videoclip oficial y descarta karaoke/cover/reaction. El video va mudo detrás del CDG; si falla, el karaoke continúa."
+      "youtube-auto": "YOUTUBE AUTO · videoclip oficial mudo, mejor calidad disponible hasta 480p. Si el original solo existe en menor calidad, usa la mejor disponible sin upscale."
     };
     const BG_QUALITY_NOTES = {
-      light: "LIGERO · fondo generado ligero; YouTube AUTO prepara hasta 360p.",
-      normal: "NORMAL · equilibrio recomendado; YouTube AUTO prepara hasta 540p.",
-      premium: "PREMIUM · máxima calidad visual; YouTube AUTO prepara hasta 720p y la TV puede degradar fondos generados si detecta carga."
-    };
-    const VIDEO_QUALITY_NOTES = {
-      auto: "AUTO · detecta la fuente, evita upscale y limita a 720p; se aplica al próximo demo de video.",
-      "360": "360p · menor consumo y preparación más rápida; se aplica al próximo demo.",
-      "540": "540p · punto medio para redes o TVs moderadas; se aplica al próximo demo.",
-      "720": "720p · máxima calidad de video del LAB; se aplica al próximo demo."
+      light: "LIGERO · menos carga para ONDAS, GLOW, GRADIENTE y PARTÍCULAS. YouTube permanece automático hasta 480p.",
+      normal: "NORMAL · equilibrio recomendado para efectos generados. YouTube permanece automático hasta 480p.",
+      premium: "PREMIUM · máxima fluidez/calidad de efectos generados. YouTube permanece automático hasta 480p."
     };
 
     function emitPlayerSettings(patch) {
@@ -410,17 +401,6 @@
       simpleLog("Rendimiento de fondo seleccionado", { mode });
     }
 
-    function setVideoQuality(mode, notify = true) {
-      if (!VIDEO_QUALITY_NOTES[mode]) mode = "auto";
-      selectedVideoQuality = mode;
-      localStorage.setItem("kitkaraoke-video-quality", mode);
-      document.querySelectorAll("#videoQualitySwitch .quality-btn").forEach((button) => {
-        button.classList.toggle("active", button.dataset.videoQuality === mode);
-      });
-      el("videoQualityNote").textContent = VIDEO_QUALITY_NOTES[mode];
-      if (notify) emitPlayerSettings({ videoQuality: mode });
-      simpleLog("Calidad de video seleccionada", { mode });
-    }
 
     function setYoutubeStyle(blur, shade, notify = true) {
       selectedYoutubeBlur = Math.max(0, Math.min(30, Math.round(Number(blur) || 0)));
@@ -449,9 +429,6 @@
     document.querySelectorAll("#backgroundQualitySwitch .quality-btn").forEach((button) => {
       button.addEventListener("click", () => setBackgroundQuality(button.dataset.bgQuality));
     });
-    document.querySelectorAll("#videoQualitySwitch .quality-btn").forEach((button) => {
-      button.addEventListener("click", () => setVideoQuality(button.dataset.videoQuality));
-    });
     el("youtubeBlur").addEventListener("input", (event) => {
       setYoutubeStyle(event.target.value, selectedYoutubeShade, true);
     });
@@ -463,7 +440,6 @@
     setCdgTransparency(selectedCdgTransparency, false);
     setCdgBackground(selectedCdgBackground, false);
     setBackgroundQuality(selectedBackgroundQuality, false);
-    setVideoQuality(selectedVideoQuality, false);
     setYoutubeStyle(selectedYoutubeBlur, selectedYoutubeShade, false);
 
     socket.on("connect", () => {
@@ -491,7 +467,6 @@
         setCdgTransparency(room.settings.cdgTransparencyMode || selectedCdgTransparency, false);
         setCdgBackground(room.settings.cdgBackground || selectedCdgBackground, false);
         setBackgroundQuality(room.settings.backgroundQuality || selectedBackgroundQuality, false);
-        setVideoQuality(room.settings.videoQuality || selectedVideoQuality, false);
         setYoutubeStyle(
           room.settings.youtubeBlur ?? selectedYoutubeBlur,
           room.settings.youtubeShade ?? selectedYoutubeShade,

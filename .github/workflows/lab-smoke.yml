@@ -95,19 +95,19 @@ jobs:
           grep -q 'backgroundQuality' src/server-v3.js
           grep -q 'videoQuality' src/server-v3.js
           grep -q 'data-bg="waves"' public/dj.html
-          grep -q 'data-video-quality="720"' public/dj.html
+          grep -q 'Video MP4 karaoke' public/dj.html
+          grep -q '>ORIGINAL</button>' public/dj.html
           grep -q 'transparentBackground' public/sdf-renderer.js
           grep -q 'transparentBackground' public/sdf-karaoke-pro-renderer.js
-          grep -q 'APP_VERSION = "0.8.0"' agent/windows/agent.py
-          grep -q '"videoQualities": \["auto", "360", "540", "720"\]' agent/windows/agent.py
-          grep -q '"smartAutoResolution": True' agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.9.0"' agent/windows/agent.py
+          grep -q '"videoQualities": \["original"\]' agent/windows/agent.py
+          grep -q '"preserveOriginalVideoResolution": True' agent/windows/agent.py
           grep -q 'AGENT_VIDEO_SOURCE_PROBED' agent/windows/agent.py
           grep -q 'AGENT_VIDEO_QUALITY_DECISION' agent/windows/agent.py
-          grep -q 'AUTO_KEEP_SOURCE_RESOLUTION' agent/windows/agent.py
-          grep -q 'AUTO_DOWNSCALE_TO_720P_CAP' agent/windows/agent.py
-          grep -q 'AUTO_UPSCALE_GUARD' agent/windows/agent.py
-          grep -q "min(1280,iw)" agent/windows/agent.py
-          grep -q "min(720,ih)" agent/windows/agent.py
+          grep -q 'VIDEO_STREAM_COPY' agent/windows/agent.py
+          grep -q 'VIDEO_COMPAT_TRANSCODE_ORIGINAL_RESOLUTION' agent/windows/agent.py
+          grep -q 'ORIGINAL_RESOLUTION_GUARD' agent/windows/agent.py
+          grep -q 'originalResolutionPreserved' agent/windows/agent.py
           grep -q 'Descargar TXT' public/dj.html
           grep -q 'data-bg="youtube-auto"' public/dj.html
           grep -q 'youtubeBlur' public/dj.html
@@ -187,7 +187,14 @@ jobs:
           assert '"karaoke",' in agent
           assert 'YOUTUBE_BACKGROUND_PREPARE_MODE' in agent
           assert 'height<=480' in agent
-          assert 'target_heights = {"light": 360, "normal": 480, "premium": 480}' in agent
+          assert 'youtubeBackgroundQualityPolicy": "BEST_AVAILABLE_UP_TO_480P"' in agent
+          assert 'target_height = 480' in agent
+          assert 'source_height <= 480' in agent
+          assert 'source_ext == "mp4"' in agent
+          assert 'VIDEO_STREAM_COPY' in agent
+          assert 'VIDEO_COMPAT_TRANSCODE_ORIGINAL_RESOLUTION' in agent
+          assert 'normalizeVideoQuality(_value)' in s
+          assert 'return "original"' in s
           assert 'duration not in (30, 45, 60, 120)' in agent
           assert 'YOUTUBE_PRELOAD_WAIT_MS = 6000' in tv
           assert 'BACKGROUND_FALLBACK_WAVES' in tv

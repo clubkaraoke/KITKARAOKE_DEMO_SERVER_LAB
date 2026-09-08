@@ -59,7 +59,7 @@ No se envían tokens ni rutas completas del disco a los logs remotos.
 
 Windows 10/11 con Python 3.11 o superior.
 
-Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.7.0.zip
+Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0.zip
 
 
 ## Nuevo en V0.6
@@ -92,3 +92,12 @@ Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.7.0.zip
 - Si necesita conversión, usa **FAST_TRANSCODE** con preset ultrafast.
 - Calidad del fondo YouTube: Ligero hasta 360p, Normal hasta 540p, Premium hasta 720p.
 - Diagnóstico nuevo: YOUTUBE_BACKGROUND_PREPARE_MODE / STREAM_COPY / FAST_TRANSCODE.
+
+
+## V0.9.0 · calidad simplificada
+
+- **YouTube Background:** una sola política automática: mejor calidad disponible hasta **480p**, sin upscale.
+- Si YouTube solo ofrece 360p/240p/144p, se conserva la mejor calidad realmente disponible.
+- Se prioriza **H.264/MP4 + STREAM_COPY** para evitar recodificaciones innecesarias.
+- **MP4 karaoke:** conserva la resolución original. Si el video ya es H.264 compatible, el stream de video se copia sin recodificar; si no, se hace transcode de compatibilidad manteniendo exactamente ancho y alto.
+- Se eliminan los perfiles manuales 360p/540p/720p para karaokes MP4.

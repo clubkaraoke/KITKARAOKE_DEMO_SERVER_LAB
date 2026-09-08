@@ -24,7 +24,7 @@ import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.9.0"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
@@ -358,13 +358,14 @@ class AgentApp:
             "ffmpeg": bool(self.ffmpeg_path),
             "cdgAacDemo": bool(self.ffmpeg_path),
             "mp4H264Demo": bool(self.ffmpeg_path),
-            "videoQualities": ["auto", "360", "540", "720"],
-            "smartAutoResolution": True,
-            "autoMaxResolution": "1280x720",
-            "autoNoUpscale": True,
+            "videoQualities": ["original"],
+            "preserveOriginalVideoResolution": True,
+            "mp4VideoStreamCopyWhenH264": True,
             "youtubeBackgroundAuto": bool(self.ytdlp_available and self.ffmpeg_path),
             "youtubeSearch": bool(self.ytdlp_available),
             "youtubeBackgroundMaxResolution": "854x480",
+            "youtubeBackgroundQualityPolicy": "BEST_AVAILABLE_UP_TO_480P",
+            "youtubeBackgroundNoUpscale": True,
             "youtubeBackgroundMuted": True,
             "youtubeResolverDrainSafe": True,
             "youtubeLivePrepare": True,
@@ -827,28 +828,23 @@ class AgentApp:
         workdir: Path,
         trace_id: str,
         room_code: str,
-        video_quality: str = "auto",
+        video_quality: str = "original",
     ) -> dict[str, Path]:
         source = Path(item["_path"])
         if not source.exists():
             raise FileNotFoundError("El video ya no existe en la carpeta autorizada")
 
-        requested = str(video_quality or "auto").strip().lower()
-        profiles = {
-            "360": {"height": 360, "crf": "24", "video_bitrate": "750k", "maxrate": "900k", "bufsize": "1800k", "audio_bitrate": "192k"},
-            "540": {"height": 540, "crf": "23", "video_bitrate": "1500k", "maxrate": "1800k", "bufsize": "3600k", "audio_bitrate": "192k"},
-            "720": {"height": 720, "crf": "22", "video_bitrate": "2800k", "maxrate": "3500k", "bufsize": "7000k", "audio_bitrate": "192k"},
-            "auto": {"height": 720, "crf": "23", "video_bitrate": None, "maxrate": None, "bufsize": None, "audio_bitrate": "192k"},
-        }
-        if requested not in profiles:
-            requested = "auto"
-        profile = profiles[requested]
+        # V0.9: los karaokes MP4 conservan SIEMPRE la resolución original.
+        # Si el video ya es H.264, copiamos el stream de video sin recodificar
+        # y solo normalizamos audio a AAC para compatibilidad del navegador.
+        requested = "original"
 
         probe_started = time.perf_counter()
         source_info = self.probe_video(source)
         source_width = int(source_info.get("width") or 0)
         source_height = int(source_info.get("height") or 0)
         source_fps = source_info.get("fps")
+        source_codec = str(source_info.get("codec") or "").upper()
         detected_resolution = self.resolution_label(source_width, source_height)
 
         self.emit_diag(
@@ -858,7 +854,7 @@ class AgentApp:
                 "sourceWidth": source_width,
                 "sourceHeight": source_height,
                 "sourceFps": source_fps,
-                "sourceCodec": source_info.get("codec"),
+                "sourceCodec": source_codec or None,
                 "sourcePixFmt": source_info.get("pixFmt"),
                 "sourceResolution": f"{source_width}x{source_height}",
                 "detectedResolution": detected_resolution,
@@ -868,23 +864,12 @@ class AgentApp:
             room_code=room_code,
         )
 
-        if requested == "auto":
-            scale_filter = (
-                "scale=w='min(1280,iw)':h='min(720,ih)':"
-                "force_original_aspect_ratio=decrease:force_divisible_by=2"
-            )
-            if source_width <= 1280 and source_height <= 720:
-                decision = "AUTO_KEEP_SOURCE_RESOLUTION"
-            else:
-                decision = "AUTO_DOWNSCALE_TO_720P_CAP"
-            no_upscale = True
-        else:
-            scale_filter = (
-                f"scale=-2:{profile['height']}:force_original_aspect_ratio=decrease,"
-                "scale=trunc(iw/2)*2:trunc(ih/2)*2"
-            )
-            decision = f"MANUAL_FORCE_{requested}P"
-            no_upscale = False
+        can_video_stream_copy = source_codec in {"H264", "AVC", "AVC1"}
+        decision = (
+            "VIDEO_STREAM_COPY"
+            if can_video_stream_copy
+            else "VIDEO_COMPAT_TRANSCODE_ORIGINAL_RESOLUTION"
+        )
 
         self.emit_diag(
             trace_id,
@@ -895,82 +880,97 @@ class AgentApp:
                 "sourceHeight": source_height,
                 "sourceFps": source_fps,
                 "detectedResolution": detected_resolution,
-                "maxWidth": 1280 if requested == "auto" else None,
-                "maxHeight": 720 if requested == "auto" else profile["height"],
+                "outputResolutionPolicy": "PRESERVE_SOURCE",
                 "decision": decision,
-                "noUpscale": no_upscale,
+                "noUpscale": True,
+                "noDownscale": True,
+                "videoStreamCopy": can_video_stream_copy,
             },
             room_code=room_code,
         )
 
         video_out = workdir / "demo.mp4"
-        args = [
-            "-i", str(source),
-            "-t", str(duration),
-            "-vf", scale_filter,
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", profile["crf"],
-            "-pix_fmt", "yuv420p",
-        ]
-        if profile["video_bitrate"]:
-            args += [
-                "-b:v", profile["video_bitrate"],
-                "-maxrate", profile["maxrate"],
-                "-bufsize", profile["bufsize"],
-            ]
-        args += [
-            "-c:a", "aac",
-            "-b:a", profile["audio_bitrate"],
-            "-movflags", "+faststart",
-            str(video_out),
-        ]
-
         started = time.perf_counter()
-        self.run_ffmpeg(args, trace_id=trace_id)
-        transcode_ms = int((time.perf_counter() - started) * 1000)
+        prepare_mode = decision
 
+        if can_video_stream_copy:
+            copy_args = [
+                "-i", str(source),
+                "-t", str(duration),
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(video_out),
+            ]
+            try:
+                self.run_ffmpeg(copy_args, trace_id=trace_id)
+            except Exception as copy_error:
+                self.emit_diag(
+                    trace_id,
+                    "AGENT_MP4_STREAM_COPY_FALLBACK",
+                    {"error": str(copy_error)[-600:]},
+                    level="warn",
+                    room_code=room_code,
+                )
+                try:
+                    video_out.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                prepare_mode = "VIDEO_COMPAT_TRANSCODE_ORIGINAL_RESOLUTION"
+
+        if prepare_mode == "VIDEO_COMPAT_TRANSCODE_ORIGINAL_RESOLUTION":
+            transcode_args = [
+                "-i", str(source),
+                "-t", str(duration),
+                "-map", "0:v:0",
+                "-map", "0:a?",
+                "-c:v", "libx264",
+                "-preset", "veryfast",
+                "-crf", "18",
+                "-pix_fmt", "yuv420p",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-movflags", "+faststart",
+                str(video_out),
+            ]
+            self.run_ffmpeg(transcode_args, trace_id=trace_id)
+
+        prepare_ms = int((time.perf_counter() - started) * 1000)
         output_info = self.probe_video(video_out)
         output_width = int(output_info.get("width") or 0)
         output_height = int(output_info.get("height") or 0)
         output_fps = output_info.get("fps")
-        upscale_detected = (
-            output_width > source_width or output_height > source_height
-        )
-        if requested == "auto" and upscale_detected:
+
+        if output_width != source_width or output_height != source_height:
             raise RuntimeError(
-                "AUTO_UPSCALE_GUARD: la salida intentó superar la resolución original"
+                "ORIGINAL_RESOLUTION_GUARD: la salida MP4 cambió la resolución original"
             )
 
         self.emit_diag(
             trace_id,
             "AGENT_MP4_TRANSCODE_READY",
             {
-                "videoCodec": "H264",
+                "videoCodec": output_info.get("codec") or "H264",
                 "audioCodec": "AAC",
-                "videoQuality": requested,
-                "requestedQuality": requested,
-                "decision": decision,
+                "audioBitrate": "192k",
+                "requestedQuality": "original",
+                "decision": prepare_mode,
                 "sourceWidth": source_width,
                 "sourceHeight": source_height,
-                "sourceFps": source_fps,
-                "sourceCodec": source_info.get("codec"),
-                "sourceResolution": f"{source_width}x{source_height}",
-                "detectedResolution": detected_resolution,
                 "outputWidth": output_width,
                 "outputHeight": output_height,
+                "sourceFps": source_fps,
                 "outputFps": output_fps,
+                "sourceResolution": f"{source_width}x{source_height}",
                 "outputResolution": f"{output_width}x{output_height}",
-                "targetHeight": 720 if requested == "auto" else profile["height"],
-                "noUpscale": no_upscale,
-                "upscaleDetected": upscale_detected,
-                "crf": int(profile["crf"]),
-                "videoBitrate": profile["video_bitrate"] or "CRF_AUTO",
-                "audioBitrate": profile["audio_bitrate"],
-                "faststart": True,
+                "originalResolutionPreserved": True,
+                "videoStreamCopied": prepare_mode == "VIDEO_STREAM_COPY",
                 "bytes": video_out.stat().st_size,
-                "transcodeMs": transcode_ms,
-                "elapsedMs": transcode_ms,
+                "prepareMs": prepare_ms,
+                "elapsedMs": prepare_ms,
             },
             room_code=room_code,
         )
@@ -1268,10 +1268,8 @@ class AgentApp:
         target = f"https://www.youtube.com/watch?v={video_id}"
         fmt = (
             "bv*[height<=480][ext=mp4][vcodec^=avc1]/"
-            "b[height<=480][ext=mp4][vcodec^=avc1]/"
             "bv*[height<=480][ext=mp4]/"
             "bv*[height<=480]/"
-            "b[height<=480][ext=mp4]/"
             "b[height<=480]"
         )
         attempts = [
@@ -1422,17 +1420,21 @@ class AgentApp:
                     if value:
                         header_lines.append(f"{key}: {value}\\r\\n")
 
+                # YouTube es solo fondo: una sola política automática.
+                # Elegimos la mejor calidad que exista hasta 480p. Si el
+                # original disponible es 360p/240p/etc., conservamos esa máxima
+                # calidad inferior. Nunca hacemos upscale.
                 quality = str(media.get("backgroundQuality") or "normal").strip().lower()
-                target_heights = {"light": 360, "normal": 480, "premium": 480}
-                target_height = target_heights.get(quality, 480)
+                target_height = 480
                 source_width = int(stream.get("width") or 0)
                 source_height = int(stream.get("height") or 0)
                 source_codec = str(stream.get("vcodec") or "").lower()
+                source_ext = str(stream.get("ext") or "").lower()
                 can_stream_copy = bool(
                     ("avc1" in source_codec or "h264" in source_codec)
+                    and source_ext == "mp4"
                     and source_height > 0
-                    and source_height <= target_height
-                    and source_width <= 1280
+                    and source_height <= 480
                 )
 
                 base_args = [
@@ -1450,10 +1452,13 @@ class AgentApp:
                     {
                         "mode": prepare_mode,
                         "backgroundQuality": quality,
-                        "targetHeight": target_height,
+                        "youtubeQualityPolicy": "BEST_AVAILABLE_UP_TO_480P",
+                        "targetHeight": 480,
                         "sourceWidth": source_width,
                         "sourceHeight": source_height,
                         "sourceCodec": stream.get("vcodec"),
+                        "sourceExt": stream.get("ext"),
+                        "noUpscale": True,
                     },
                     room_code=room_code,
                 )
@@ -1487,7 +1492,7 @@ class AgentApp:
                         "-an",
                         "-vf",
                         (
-                            f"scale=w='min(1280,iw)':h='min({target_height},ih)':"
+                            "scale=w='min(iw,854)':h='min(ih,480)':"
                             "force_original_aspect_ratio=decrease:force_divisible_by=2"
                         ),
                         "-c:v", "libx264",
@@ -1515,7 +1520,9 @@ class AgentApp:
                     "resolverMode": stream.get("resolverMode"),
                     "prepareMode": prepare_mode,
                     "backgroundQuality": quality,
-                    "targetHeight": target_height,
+                    "youtubeQualityPolicy": "BEST_AVAILABLE_UP_TO_480P",
+                    "targetHeight": 480,
+                    "noUpscale": True,
                     "bytes": output.stat().st_size,
                     "elapsedMs": prepare_ms,
                     "muted": True,
@@ -1656,7 +1663,7 @@ class AgentApp:
                     "title": str(media.get("title") or ""),
                     "format": str(media.get("format") or ""),
                     "duration": duration,
-                    "videoQuality": str(media.get("videoQuality") or "auto"),
+                    "videoQuality": str(media.get("videoQuality") or "original"),
                     "cdgBackground": str(media.get("cdgBackground") or ""),
                     "youtubeBackground": str(media.get("cdgBackground") or "").lower() == "youtube-auto",
                 },
@@ -1721,7 +1728,7 @@ class AgentApp:
                         workdir,
                         trace_id,
                         room_code,
-                        str(media.get("videoQuality") or "auto"),
+                        str(media.get("videoQuality") or "original"),
                     )
 
                 background_core_ready.set()

@@ -18,10 +18,14 @@ jobs:
       - name: Validate agent
         run: |
           python3 -m py_compile agent/windows/agent.py
-          grep -q 'APP_VERSION = "0.8.0"' agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.9.0"' agent/windows/agent.py
           grep -q 'AGENT_PREPARE_COMPLETE' agent/windows/agent.py
           grep -q 'AGENT_VIDEO_SOURCE_PROBED' agent/windows/agent.py
-          grep -q 'AUTO_UPSCALE_GUARD' agent/windows/agent.py
+          grep -q 'ORIGINAL_RESOLUTION_GUARD' agent/windows/agent.py
+          grep -q 'VIDEO_STREAM_COPY' agent/windows/agent.py
+          grep -q 'VIDEO_COMPAT_TRANSCODE_ORIGINAL_RESOLUTION' agent/windows/agent.py
+          grep -q '"videoQualities": \["original"\]' agent/windows/agent.py
+          grep -q '"youtubeBackgroundQualityPolicy": "BEST_AVAILABLE_UP_TO_480P"' agent/windows/agent.py
           grep -q 'YOUTUBE_BACKGROUND_SELECTED' agent/windows/agent.py
           grep -q 'YOUTUBE_BACKGROUND_FALLBACK' agent/windows/agent.py
           grep -q 'youtubeBackgroundNonBlocking' agent/windows/agent.py
@@ -41,7 +45,7 @@ jobs:
       - name: Build ZIP
         run: |
           set -euo pipefail
-          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.8.0
+          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0
           mkdir -p "$ROOT/engine"
           cp agent/windows/agent.py "$ROOT/"
           cp agent/windows/requirements.txt "$ROOT/"
@@ -56,12 +60,12 @@ jobs:
           test -s "$ROOT/engine/deno.exe"
 
           cd dist
-          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.8.0.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.8.0
+          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0
 
       - name: Upload ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.8.0
-          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.8.0.zip
+          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0
+          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0.zip
           if-no-files-found: error
           retention-days: 14
