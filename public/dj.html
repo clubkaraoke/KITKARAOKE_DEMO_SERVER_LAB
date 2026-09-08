@@ -600,7 +600,7 @@
 
       socket.emit("media:prepare", {
         media,
-        duration: Number(el("demoDuration").value || 120)
+        duration: Number(el("demoDuration").value || 120),
         origin: location.origin
       }, (response) => {
         if (!response.ok) {
