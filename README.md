@@ -40,7 +40,7 @@ PLAY sin depender de la red durante la canción
 - CDG compuesto como capa transparente.
 - Fondos generados por código: Negro / Ondas / Glow / Gradiente / Partículas.
 - Rendimiento de fondo: Ligero / Normal / Premium con degradación automática si la TV no sostiene FPS.
-- Video: AUTO / 360p / 540p / 720p.
+- Video: AUTO inteligente / 360p / 540p / 720p. AUTO inspecciona la fuente, conserva resoluciones <=1280×720 y solo reduce fuentes mayores; nunca hace upscale.
 - Precarga completa antes de PLAY.
 - Recuperación automática de Socket.IO y preservación del Blob ya precargado.
 - Reintentos de precarga HTTP.
