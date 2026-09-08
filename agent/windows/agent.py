@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import difflib
 import hashlib
+import importlib.util
 import json
 import os
 import queue
@@ -8,6 +10,7 @@ import re
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,7 +24,7 @@ import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
@@ -163,6 +166,9 @@ class AgentApp:
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.ffmpeg_path = self.detect_ffmpeg()
         self.ffprobe_path = self.detect_ffprobe()
+        self.node_path = shutil.which("node") or shutil.which("nodejs") or ""
+        self.deno_path = shutil.which("deno") or ""
+        self.ytdlp_available = importlib.util.find_spec("yt_dlp") is not None
         self.prepare_lock = threading.Lock()
         self.cancelled_traces: set[str] = set()
         self.latest_prepare_trace_id = ""
@@ -191,6 +197,12 @@ class AgentApp:
                 self.add_log("FFprobe no encontrado · AUTO usará inspección segura con FFmpeg.")
         else:
             self.add_log("ERROR: no se encontró FFmpeg.")
+
+        if self.ytdlp_available:
+            runtime = "Node" if self.node_path else ("Deno" if self.deno_path else "runtime JS automático")
+            self.add_log(f"YouTube Background AUTO listo · yt-dlp + {runtime}.")
+        else:
+            self.add_log("YouTube Background AUTO no disponible · falta instalar yt-dlp.")
 
         if self.folder_var.get():
             self.start_scan(auto=True)
@@ -345,6 +357,10 @@ class AgentApp:
             "smartAutoResolution": True,
             "autoMaxResolution": "1280x720",
             "autoNoUpscale": True,
+            "youtubeBackgroundAuto": bool(self.ytdlp_available and self.ffmpeg_path),
+            "youtubeSearch": bool(self.ytdlp_available),
+            "youtubeBackgroundMaxResolution": "1280x720",
+            "youtubeBackgroundMuted": True,
             "transportMode": "HTTP_PRELOAD",
             "fullPreloadRecommended": True,
             "version": APP_VERSION,
@@ -457,7 +473,8 @@ class AgentApp:
             text=(
                 "CDG: recorte + audio AAC 160 kbps. "
                 "MP4 AUTO: detecta resolución/FPS y limita a 1280×720 sin upscale. "
-                "La TV precarga el demo completo antes de PLAY."
+                "YouTube Background AUTO: búsqueda + selección + video mudo opcional. "
+                "La TV precarga el demo principal completo antes de PLAY."
             ),
             wraplength=750,
             justify="left",
@@ -764,7 +781,6 @@ class AgentApp:
                 "bytes": cdg_out.stat().st_size,
                 "elapsedMs": int((time.perf_counter() - started) * 1000),
                 "duration": duration,
-                "videoQuality": str(media.get("videoQuality") or "auto") if item["format"] != "CDG" else None,
             },
             room_code=room_code,
         )
@@ -951,6 +967,455 @@ class AgentApp:
         )
         return {"video": video_out}
 
+    @staticmethod
+    def _clean_youtube_component(value: str) -> str:
+        text = str(value or "").replace("_", " ")
+        text = re.sub(
+            r"(?i)\\b(karaoke|hifi|djgabo|club\\s+karaoke|clean\\s+edit|720p|1080p|2160p|4k|hd|fhd|uhd)\\b",
+            " ",
+            text,
+        )
+        text = re.sub(r"(?i)\\((coro|coros|voz\\s+(mujer|hombre)|instrumental)\\)", " ", text)
+        text = re.sub(r"\\s+", " ", text).strip(" -–—")
+        return text
+
+    def _youtube_base_args(self) -> list[str]:
+        args = [
+            sys.executable,
+            "-m",
+            "yt_dlp",
+            "--ignore-config",
+            "--no-warnings",
+            "--no-playlist",
+            "--socket-timeout",
+            "12",
+            "--retries",
+            "2",
+            "--extractor-retries",
+            "2",
+        ]
+        if self.node_path:
+            args += ["--js-runtimes", f"node:{self.node_path}"]
+        elif self.deno_path:
+            args += ["--js-runtimes", f"deno:{self.deno_path}"]
+        cookies = Path(__file__).with_name("cookies.txt")
+        try:
+            if cookies.exists() and cookies.stat().st_size > 100:
+                args += ["--cookies", str(cookies)]
+        except Exception:
+            pass
+        return args
+
+    def _run_ytdlp_json(
+        self,
+        args: list[str],
+        trace_id: str,
+        timeout: int = 45,
+    ) -> dict:
+        if not self.ytdlp_available:
+            raise RuntimeError("YTDLP_NOT_AVAILABLE")
+        command = self._youtube_base_args() + args
+        started = time.monotonic()
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        while process.poll() is None:
+            if trace_id and self.is_cancelled(trace_id):
+                try:
+                    process.terminate()
+                    process.wait(timeout=2)
+                except Exception:
+                    try:
+                        process.kill()
+                    except Exception:
+                        pass
+                raise RuntimeError("PREPARE_SUPERSEDED")
+            if time.monotonic() - started > timeout:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                raise RuntimeError("YTDLP_TIMEOUT")
+            time.sleep(0.10)
+
+        stdout, stderr = process.communicate()
+        if process.returncode != 0 or not (stdout or "").strip():
+            detail = " ".join((stderr or stdout or "yt-dlp error").split())
+            raise RuntimeError(detail[-1200:])
+        try:
+            return json.loads(stdout)
+        except Exception as exc:
+            raise RuntimeError("YTDLP_JSON_INVALID") from exc
+
+    def search_youtube_background(
+        self,
+        artist: str,
+        song_title: str,
+        trace_id: str,
+        room_code: str,
+    ) -> dict:
+        artist_clean = self._clean_youtube_component(artist)
+        title_clean = self._clean_youtube_component(song_title)
+        if not title_clean:
+            raise RuntimeError("YOUTUBE_QUERY_EMPTY")
+        query = " ".join(x for x in [artist_clean, title_clean, "official video"] if x).strip()
+        started = time.perf_counter()
+        self.emit_diag(
+            trace_id,
+            "YOUTUBE_BACKGROUND_SEARCH_START",
+            {"query": query, "limit": 12},
+            room_code=room_code,
+        )
+        payload = self._run_ytdlp_json(
+            ["--flat-playlist", "--dump-single-json", f"ytsearch12:{query}"],
+            trace_id,
+            timeout=40,
+        )
+        entries = [e for e in (payload.get("entries") or []) if isinstance(e, dict)]
+        if not entries:
+            raise RuntimeError("YOUTUBE_SEARCH_NO_RESULTS")
+
+        artist_norm = normalize_text(artist_clean)
+        title_norm = normalize_text(title_clean)
+        title_tokens = [t for t in title_norm.split() if len(t) > 1]
+        negative_terms = {
+            "karaoke": 140,
+            "cover": 100,
+            "reaction": 120,
+            "reaccion": 120,
+            "lyrics": 45,
+            "lyric": 45,
+            "letra": 45,
+            "slowed": 80,
+            "sped": 80,
+            "nightcore": 100,
+            "tutorial": 100,
+        }
+        live_terms = (" live ", " en vivo ", " concierto ", " concert ")
+
+        candidates = []
+        for rank, entry in enumerate(entries):
+            video_id = str(entry.get("id") or "")
+            if not re.fullmatch(r"[A-Za-z0-9_-]{11}", video_id):
+                continue
+            yt_title = str(entry.get("title") or "")
+            channel = str(entry.get("channel") or entry.get("uploader") or "")
+            title_key = " " + normalize_text(yt_title) + " "
+            channel_key = normalize_text(channel)
+            if not title_tokens:
+                continue
+            coverage = sum(1 for token in title_tokens if token in title_key) / max(1, len(title_tokens))
+            similarity = difflib.SequenceMatcher(None, title_norm, normalize_text(yt_title)).ratio()
+            artist_match = bool(
+                artist_norm and (
+                    artist_norm in channel_key
+                    or artist_norm in title_key
+                    or all(t in (channel_key + " " + title_key) for t in artist_norm.split() if len(t) > 2)
+                )
+            )
+            if coverage < 0.55 and similarity < 0.48:
+                continue
+
+            lowered = title_key
+            penalty = 0
+            for term, points in negative_terms.items():
+                if f" {term} " in lowered:
+                    penalty += points
+            if any(term in lowered for term in live_terms):
+                penalty += 30
+
+            verified = bool(entry.get("channel_is_verified"))
+            official_marker = any(
+                marker in lowered
+                for marker in (
+                    " official ",
+                    " video oficial ",
+                    " official music video ",
+                    " videoclip oficial ",
+                )
+            )
+            channel_official_marker = "official" in channel_key or "vevo" in channel_key
+            official_confidence = (
+                "verified-artist-channel"
+                if verified and artist_match
+                else "artist-channel-official-marker"
+                if artist_match and (official_marker or channel_official_marker)
+                else ""
+            )
+            official = bool(official_confidence)
+            try:
+                views = int(entry.get("view_count") or 0)
+            except Exception:
+                views = 0
+
+            score = int(coverage * 100) + int(similarity * 40)
+            if artist_match:
+                score += 55
+            if official_marker:
+                score += 55
+            if verified and artist_match:
+                score += 80
+            score -= penalty
+            candidates.append(
+                {
+                    "youtubeId": video_id,
+                    "title": yt_title[:240],
+                    "channel": channel[:180],
+                    "viewCount": max(0, views),
+                    "official": official,
+                    "officialConfidence": official_confidence,
+                    "score": score,
+                    "coverage": round(coverage, 3),
+                    "rank": rank,
+                }
+            )
+
+        if not candidates:
+            raise RuntimeError("YOUTUBE_SEARCH_NO_MATCHING_VIDEO")
+
+        official_candidates = [c for c in candidates if c["official"] and c["score"] > 0]
+        if official_candidates:
+            selected = sorted(
+                official_candidates,
+                key=lambda x: (
+                    x["officialConfidence"] == "verified-artist-channel",
+                    x["score"],
+                    x["viewCount"],
+                    -x["rank"],
+                ),
+                reverse=True,
+            )[0]
+            selected["selectionReason"] = "OFFICIAL_CHANNEL_FIRST"
+        else:
+            usable = [c for c in candidates if c["score"] > 0]
+            if not usable:
+                raise RuntimeError("YOUTUBE_SEARCH_ONLY_LOW_CONFIDENCE_RESULTS")
+            has_views = any(c["viewCount"] > 0 for c in usable)
+            selected = sorted(
+                usable,
+                key=(
+                    (lambda x: (x["viewCount"], x["score"], -x["rank"]))
+                    if has_views
+                    else (lambda x: (x["score"], -x["rank"]))
+                ),
+                reverse=True,
+            )[0]
+            selected["selectionReason"] = (
+                "MOST_VIEWED_MATCH" if has_views else "SEARCH_RANK_FALLBACK"
+            )
+
+        self.emit_diag(
+            trace_id,
+            "YOUTUBE_BACKGROUND_SELECTED",
+            {
+                **selected,
+                "candidateCount": len(candidates),
+                "searchMs": int((time.perf_counter() - started) * 1000),
+            },
+            room_code=room_code,
+        )
+        return selected
+
+    def resolve_youtube_video_stream(
+        self,
+        video_id: str,
+        trace_id: str,
+        room_code: str,
+    ) -> dict:
+        target = f"https://www.youtube.com/watch?v={video_id}"
+        fmt = (
+            "bv*[height<=720][ext=mp4]/"
+            "bv*[height<=720]/"
+            "b[height<=720][ext=mp4]/"
+            "b[height<=720]"
+        )
+        attempts = [
+            ("DEFAULT", []),
+            ("ANDROID_VR", ["--extractor-args", "youtube:player_client=android_vr"]),
+            ("WEB_SAFARI", ["--extractor-args", "youtube:player_client=web_safari"]),
+        ]
+        errors = []
+        for label, extra in attempts:
+            self.ensure_not_cancelled(trace_id)
+            try:
+                info = self._run_ytdlp_json(
+                    [
+                        *extra,
+                        "--skip-download",
+                        "--dump-single-json",
+                        "-f",
+                        fmt,
+                        target,
+                    ],
+                    trace_id,
+                    timeout=55,
+                )
+                stream = None
+                requested = info.get("requested_formats") or []
+                for part in requested:
+                    if isinstance(part, dict) and str(part.get("vcodec") or "none") != "none" and part.get("url"):
+                        stream = part
+                        break
+                if stream is None and info.get("url"):
+                    stream = info
+                if not stream or not stream.get("url"):
+                    raise RuntimeError("YOUTUBE_STREAM_URL_MISSING")
+                result = {
+                    "url": str(stream["url"]),
+                    "headers": stream.get("http_headers") or info.get("http_headers") or {},
+                    "width": int(stream.get("width") or info.get("width") or 0),
+                    "height": int(stream.get("height") or info.get("height") or 0),
+                    "fps": stream.get("fps") or info.get("fps"),
+                    "vcodec": str(stream.get("vcodec") or info.get("vcodec") or ""),
+                    "formatId": str(stream.get("format_id") or info.get("format_id") or ""),
+                    "resolverMode": label,
+                }
+                self.emit_diag(
+                    trace_id,
+                    "YOUTUBE_BACKGROUND_STREAM_RESOLVED",
+                    {
+                        "resolverMode": label,
+                        "sourceWidth": result["width"],
+                        "sourceHeight": result["height"],
+                        "sourceFps": result["fps"],
+                        "videoCodec": result["vcodec"],
+                        "formatId": result["formatId"],
+                    },
+                    room_code=room_code,
+                )
+                return result
+            except Exception as exc:
+                if str(exc) == "PREPARE_SUPERSEDED":
+                    raise
+                errors.append(f"{label}: {str(exc)[-450:]}")
+        raise RuntimeError("YOUTUBE_RESOLVE_FAILED · " + " | ".join(errors[-3:]))
+
+    def prepare_youtube_background(
+        self,
+        media: dict,
+        duration: int,
+        upload_url: str,
+        upload_token: str,
+        trace_id: str,
+        room_code: str,
+    ) -> None:
+        try:
+            if not upload_url:
+                return
+            if not self.ytdlp_available:
+                raise RuntimeError("YTDLP_NOT_AVAILABLE")
+            artist = str(media.get("artist") or "")
+            song_title = str(media.get("songTitle") or "")
+            if not song_title:
+                parsed_artist, parsed_title = parse_artist_title(str(media.get("title") or ""))
+                artist = artist or parsed_artist
+                song_title = parsed_title
+            selected = self.search_youtube_background(
+                artist,
+                song_title,
+                trace_id,
+                room_code,
+            )
+            stream = self.resolve_youtube_video_stream(
+                selected["youtubeId"],
+                trace_id,
+                room_code,
+            )
+            self.ensure_not_cancelled(trace_id)
+
+            with tempfile.TemporaryDirectory(prefix="kitkaraoke-youtube-bg-") as temp:
+                output = Path(temp) / "background.mp4"
+                header_lines = []
+                for key in ("User-Agent", "Referer", "Origin"):
+                    value = str((stream.get("headers") or {}).get(key) or "")
+                    if value:
+                        header_lines.append(f"{key}: {value}\\r\\n")
+                args = [
+                    "-reconnect", "1",
+                    "-reconnect_streamed", "1",
+                    "-reconnect_delay_max", "5",
+                ]
+                if header_lines:
+                    args += ["-headers", "".join(header_lines)]
+                args += [
+                    "-i", stream["url"],
+                    "-t", str(duration),
+                    "-an",
+                    "-vf",
+                    "scale=w='min(1280,iw)':h='min(720,ih)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-crf", "26",
+                    "-maxrate", "1800k",
+                    "-bufsize", "3600k",
+                    "-pix_fmt", "yuv420p",
+                    "-movflags", "+faststart",
+                    str(output),
+                ]
+                started = time.perf_counter()
+                self.run_ffmpeg(args, trace_id=trace_id)
+                transcode_ms = int((time.perf_counter() - started) * 1000)
+                out_info = self.probe_video(output)
+                meta = {
+                    **selected,
+                    "sourceWidth": int(stream.get("width") or 0),
+                    "sourceHeight": int(stream.get("height") or 0),
+                    "sourceFps": stream.get("fps"),
+                    "outputWidth": int(out_info.get("width") or 0),
+                    "outputHeight": int(out_info.get("height") or 0),
+                    "outputFps": out_info.get("fps"),
+                    "resolverMode": stream.get("resolverMode"),
+                    "bytes": output.stat().st_size,
+                    "elapsedMs": transcode_ms,
+                    "muted": True,
+                }
+                self.emit_diag(
+                    trace_id,
+                    "YOUTUBE_BACKGROUND_TRANSCODE_READY",
+                    meta,
+                    room_code=room_code,
+                )
+                self.upload_part(
+                    upload_url,
+                    upload_token,
+                    output,
+                    "background",
+                    trace_id,
+                    room_code,
+                )
+                self.ensure_not_cancelled(trace_id)
+                self.sio.emit(
+                    "agent:background:complete",
+                    {"traceId": trace_id, "background": meta},
+                )
+        except Exception as exc:
+            if str(exc) == "PREPARE_SUPERSEDED":
+                self.emit_diag(
+                    trace_id,
+                    "YOUTUBE_BACKGROUND_CANCELLED",
+                    {"reason": "replaced-by-newer-request"},
+                    level="warn",
+                    room_code=room_code,
+                )
+                return
+            self.emit_diag(
+                trace_id,
+                "YOUTUBE_BACKGROUND_FALLBACK",
+                {
+                    "error": str(exc)[-1200:],
+                    "fallback": "GENERATED_BACKGROUND",
+                    "karaokeContinues": True,
+                },
+                level="warn",
+                room_code=room_code,
+            )
+
     def upload_part(
         self,
         url: str,
@@ -965,6 +1430,7 @@ class AgentApp:
             "cdg": "application/octet-stream",
             "audio": "audio/mp4",
             "video": "video/mp4",
+            "background": "video/mp4",
         }.get(kind, "application/octet-stream")
         started = time.perf_counter()
 
@@ -1033,6 +1499,8 @@ class AgentApp:
                     "format": str(media.get("format") or ""),
                     "duration": duration,
                     "videoQuality": str(media.get("videoQuality") or "auto"),
+                    "cdgBackground": str(media.get("cdgBackground") or ""),
+                    "youtubeBackground": str(media.get("cdgBackground") or "").lower() == "youtube-auto",
                 },
                 room_code=room_code,
             )
@@ -1052,6 +1520,34 @@ class AgentApp:
                 },
                 room_code=room_code,
             )
+
+            if (
+                item["format"] == "CDG"
+                and str(media.get("cdgBackground") or "").lower() == "youtube-auto"
+                and str(uploads.get("background") or "")
+            ):
+                threading.Thread(
+                    target=self.prepare_youtube_background,
+                    args=(
+                        dict(media),
+                        duration,
+                        str(uploads.get("background") or ""),
+                        upload_token,
+                        trace_id,
+                        room_code,
+                    ),
+                    daemon=True,
+                ).start()
+                self.emit_diag(
+                    trace_id,
+                    "YOUTUBE_BACKGROUND_ASYNC_STARTED",
+                    {
+                        "artist": str(media.get("artist") or ""),
+                        "songTitle": str(media.get("songTitle") or ""),
+                        "nonBlocking": True,
+                    },
+                    room_code=room_code,
+                )
 
             with tempfile.TemporaryDirectory(prefix="kitkaraoke-demo-") as temp:
                 workdir = Path(temp)
@@ -1094,6 +1590,10 @@ class AgentApp:
                 "uploadMs": upload_ms,
                 "totalBytes": total_bytes,
                 "duration": duration,
+                "youtubeBackgroundNonBlocking": bool(
+                    item["format"] == "CDG"
+                    and str(media.get("cdgBackground") or "").lower() == "youtube-auto"
+                ),
             }
             self.emit_diag(
                 trace_id,
