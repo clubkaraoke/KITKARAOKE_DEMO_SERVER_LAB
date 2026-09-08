@@ -11,7 +11,7 @@ on:
 jobs:
   package:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
 
@@ -25,15 +25,26 @@ jobs:
           grep -q 'YOUTUBE_BACKGROUND_SELECTED' agent/windows/agent.py
           grep -q 'YOUTUBE_BACKGROUND_FALLBACK' agent/windows/agent.py
           grep -q 'youtubeBackgroundNonBlocking' agent/windows/agent.py
-          grep -q '^yt-dlp' agent/windows/requirements.txt
+          grep -q '^yt-dlp\[default\]' agent/windows/requirements.txt
+          grep -q 'bundled_deno' agent/windows/agent.py
 
       - name: Build ZIP
         run: |
-          mkdir -p dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
-          cp agent/windows/agent.py dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6/
-          cp agent/windows/requirements.txt dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6/
-          cp agent/windows/INICIAR_KITKARAOKE_AGENT.bat dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6/
-          cp agent/windows/README.md dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6/
+          set -euo pipefail
+          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
+          mkdir -p "$ROOT/engine"
+          cp agent/windows/agent.py "$ROOT/"
+          cp agent/windows/requirements.txt "$ROOT/"
+          cp agent/windows/INICIAR_KITKARAOKE_AGENT.bat "$ROOT/"
+          cp agent/windows/README.md "$ROOT/"
+
+          # Runtime JS portable requerido por yt-dlp para YouTube moderno.
+          # Se fija versión y SHA256 para que el paquete sea reproducible.
+          curl -fL --retry 3             https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-pc-windows-msvc.zip             -o /tmp/deno-windows.zip
+          echo "15e5300b0ba3c3695a7621d90160a746ec9e710228cee639afa9d580f6e3cd11  /tmp/deno-windows.zip" | sha256sum -c -
+          unzip -j /tmp/deno-windows.zip deno.exe -d "$ROOT/engine"
+          test -s "$ROOT/engine/deno.exe"
+
           cd dist
           zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.6
 
