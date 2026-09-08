@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import queue
+import re
 import shutil
 import socket
 import subprocess
@@ -20,7 +21,7 @@ import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
@@ -161,6 +162,7 @@ class AgentApp:
         self.stop_event = threading.Event()
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.ffmpeg_path = self.detect_ffmpeg()
+        self.ffprobe_path = self.detect_ffprobe()
         self.prepare_lock = threading.Lock()
         self.cancelled_traces: set[str] = set()
         self.latest_prepare_trace_id = ""
@@ -183,6 +185,10 @@ class AgentApp:
 
         if self.ffmpeg_path:
             self.add_log("Motor FFmpeg listo para demos CDG/MP4.")
+            if self.ffprobe_path:
+                self.add_log("FFprobe listo · AUTO detectará resolución/FPS/codec del MP4.")
+            else:
+                self.add_log("FFprobe no encontrado · AUTO usará inspección segura con FFmpeg.")
         else:
             self.add_log("ERROR: no se encontró FFmpeg.")
 
@@ -200,6 +206,135 @@ class AgentApp:
         except Exception:
             return ""
 
+    def detect_ffprobe(self) -> str:
+        system = shutil.which("ffprobe")
+        if system:
+            return system
+        if not self.ffmpeg_path:
+            return ""
+        ffmpeg = Path(self.ffmpeg_path)
+        candidates = [
+            ffmpeg.with_name("ffprobe.exe"),
+            ffmpeg.with_name("ffprobe"),
+        ]
+        name = ffmpeg.name
+        if "ffmpeg" in name.lower():
+            replaced = re.sub("ffmpeg", "ffprobe", name, count=1, flags=re.IGNORECASE)
+            candidates.append(ffmpeg.with_name(replaced))
+        for candidate in candidates:
+            try:
+                if candidate.exists() and candidate.is_file():
+                    return str(candidate)
+            except Exception:
+                continue
+        return ""
+
+    @staticmethod
+    def _parse_fps(value: str | None) -> float | None:
+        raw = str(value or "").strip()
+        if not raw or raw in {"0/0", "N/A"}:
+            return None
+        try:
+            if "/" in raw:
+                num, den = raw.split("/", 1)
+                den_f = float(den)
+                if den_f == 0:
+                    return None
+                return round(float(num) / den_f, 3)
+            return round(float(raw), 3)
+        except Exception:
+            return None
+
+    def probe_video(self, source: Path) -> dict:
+        if self.ffprobe_path:
+            try:
+                command = [
+                    self.ffprobe_path,
+                    "-v", "error",
+                    "-select_streams", "v:0",
+                    "-show_entries",
+                    "stream=width,height,codec_name,avg_frame_rate,r_frame_rate,pix_fmt",
+                    "-of", "json",
+                    str(source),
+                ]
+                proc = subprocess.run(
+                    command,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    timeout=20,
+                    creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+                )
+                if proc.returncode == 0:
+                    payload = json.loads(proc.stdout or "{}")
+                    streams = payload.get("streams") or []
+                    if streams:
+                        stream = streams[0]
+                        width = int(stream.get("width") or 0)
+                        height = int(stream.get("height") or 0)
+                        if width > 0 and height > 0:
+                            fps = self._parse_fps(
+                                stream.get("avg_frame_rate") or stream.get("r_frame_rate")
+                            )
+                            return {
+                                "width": width,
+                                "height": height,
+                                "fps": fps,
+                                "codec": str(stream.get("codec_name") or "").upper() or None,
+                                "pixFmt": str(stream.get("pix_fmt") or "") or None,
+                                "probe": "ffprobe",
+                            }
+            except Exception:
+                pass
+
+        if not self.ffmpeg_path:
+            raise RuntimeError("No hay motor para inspeccionar el video")
+
+        command = [
+            self.ffmpeg_path,
+            "-hide_banner",
+            "-i", str(source),
+            "-map", "0:v:0",
+            "-frames:v", "1",
+            "-an",
+            "-f", "null",
+            "-",
+        ]
+        proc = subprocess.run(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=30,
+            creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        text_out = (proc.stderr or "") + "\n" + (proc.stdout or "")
+        video_line = next(
+            (line for line in text_out.splitlines() if "Video:" in line),
+            "",
+        )
+        match_size = re.search(r"(?<!\d)(\d{2,5})x(\d{2,5})(?!\d)", video_line)
+        if not match_size:
+            raise RuntimeError("No se pudo detectar la resolución del MP4")
+        width = int(match_size.group(1))
+        height = int(match_size.group(2))
+        match_fps = re.search(r"(\d+(?:\.\d+)?)\s*fps\b", video_line)
+        match_codec = re.search(r"Video:\s*([^,\s]+)", video_line)
+        return {
+            "width": width,
+            "height": height,
+            "fps": round(float(match_fps.group(1)), 3) if match_fps else None,
+            "codec": match_codec.group(1).upper() if match_codec else None,
+            "pixFmt": None,
+            "probe": "ffmpeg-fallback",
+        }
+
+    @staticmethod
+    def resolution_label(width: int, height: int) -> str:
+        if width <= 0 or height <= 0:
+            return "unknown"
+        return f"{height}p"
+
     def capabilities(self) -> dict:
         return {
             "prepareMedia": bool(self.ffmpeg_path),
@@ -207,6 +342,9 @@ class AgentApp:
             "cdgAacDemo": bool(self.ffmpeg_path),
             "mp4H264Demo": bool(self.ffmpeg_path),
             "videoQualities": ["auto", "360", "540", "720"],
+            "smartAutoResolution": True,
+            "autoMaxResolution": "1280x720",
+            "autoNoUpscale": True,
             "transportMode": "HTTP_PRELOAD",
             "fullPreloadRecommended": True,
             "version": APP_VERSION,
@@ -318,7 +456,7 @@ class AgentApp:
             engine,
             text=(
                 "CDG: recorte + audio AAC 160 kbps. "
-                "MP4: H.264/AAC 720p con faststart. "
+                "MP4 AUTO: detecta resolución/FPS y limita a 1280×720 sin upscale. "
                 "La TV precarga el demo completo antes de PLAY."
             ),
             wraplength=750,
@@ -681,11 +819,70 @@ class AgentApp:
             requested = "auto"
         profile = profiles[requested]
 
+        probe_started = time.perf_counter()
+        source_info = self.probe_video(source)
+        source_width = int(source_info.get("width") or 0)
+        source_height = int(source_info.get("height") or 0)
+        source_fps = source_info.get("fps")
+        detected_resolution = self.resolution_label(source_width, source_height)
+
+        self.emit_diag(
+            trace_id,
+            "AGENT_VIDEO_SOURCE_PROBED",
+            {
+                "sourceWidth": source_width,
+                "sourceHeight": source_height,
+                "sourceFps": source_fps,
+                "sourceCodec": source_info.get("codec"),
+                "sourcePixFmt": source_info.get("pixFmt"),
+                "sourceResolution": f"{source_width}x{source_height}",
+                "detectedResolution": detected_resolution,
+                "probe": source_info.get("probe"),
+                "elapsedMs": int((time.perf_counter() - probe_started) * 1000),
+            },
+            room_code=room_code,
+        )
+
+        if requested == "auto":
+            scale_filter = (
+                "scale=w='min(1280,iw)':h='min(720,ih)':"
+                "force_original_aspect_ratio=decrease:force_divisible_by=2"
+            )
+            if source_width <= 1280 and source_height <= 720:
+                decision = "AUTO_KEEP_SOURCE_RESOLUTION"
+            else:
+                decision = "AUTO_DOWNSCALE_TO_720P_CAP"
+            no_upscale = True
+        else:
+            scale_filter = (
+                f"scale=-2:{profile['height']}:force_original_aspect_ratio=decrease,"
+                "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+            )
+            decision = f"MANUAL_FORCE_{requested}P"
+            no_upscale = False
+
+        self.emit_diag(
+            trace_id,
+            "AGENT_VIDEO_QUALITY_DECISION",
+            {
+                "requestedQuality": requested,
+                "sourceWidth": source_width,
+                "sourceHeight": source_height,
+                "sourceFps": source_fps,
+                "detectedResolution": detected_resolution,
+                "maxWidth": 1280 if requested == "auto" else None,
+                "maxHeight": 720 if requested == "auto" else profile["height"],
+                "decision": decision,
+                "noUpscale": no_upscale,
+            },
+            room_code=room_code,
+        )
+
         video_out = workdir / "demo.mp4"
         args = [
             "-i", str(source),
             "-t", str(duration),
-            "-vf", f"scale=-2:{profile['height']}:force_original_aspect_ratio=decrease",
+            "-vf", scale_filter,
             "-c:v", "libx264",
             "-preset", "veryfast",
             "-crf", profile["crf"],
@@ -706,6 +903,20 @@ class AgentApp:
 
         started = time.perf_counter()
         self.run_ffmpeg(args, trace_id=trace_id)
+        transcode_ms = int((time.perf_counter() - started) * 1000)
+
+        output_info = self.probe_video(video_out)
+        output_width = int(output_info.get("width") or 0)
+        output_height = int(output_info.get("height") or 0)
+        output_fps = output_info.get("fps")
+        upscale_detected = (
+            output_width > source_width or output_height > source_height
+        )
+        if requested == "auto" and upscale_detected:
+            raise RuntimeError(
+                "AUTO_UPSCALE_GUARD: la salida intentó superar la resolución original"
+            )
+
         self.emit_diag(
             trace_id,
             "AGENT_MP4_TRANSCODE_READY",
@@ -713,13 +924,28 @@ class AgentApp:
                 "videoCodec": "H264",
                 "audioCodec": "AAC",
                 "videoQuality": requested,
-                "targetHeight": profile["height"],
+                "requestedQuality": requested,
+                "decision": decision,
+                "sourceWidth": source_width,
+                "sourceHeight": source_height,
+                "sourceFps": source_fps,
+                "sourceCodec": source_info.get("codec"),
+                "sourceResolution": f"{source_width}x{source_height}",
+                "detectedResolution": detected_resolution,
+                "outputWidth": output_width,
+                "outputHeight": output_height,
+                "outputFps": output_fps,
+                "outputResolution": f"{output_width}x{output_height}",
+                "targetHeight": 720 if requested == "auto" else profile["height"],
+                "noUpscale": no_upscale,
+                "upscaleDetected": upscale_detected,
                 "crf": int(profile["crf"]),
                 "videoBitrate": profile["video_bitrate"] or "CRF_AUTO",
                 "audioBitrate": profile["audio_bitrate"],
                 "faststart": True,
                 "bytes": video_out.stat().st_size,
-                "elapsedMs": int((time.perf_counter() - started) * 1000),
+                "transcodeMs": transcode_ms,
+                "elapsedMs": transcode_ms,
             },
             room_code=room_code,
         )
