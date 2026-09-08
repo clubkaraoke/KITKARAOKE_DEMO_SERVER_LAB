@@ -1,4 +1,4 @@
-# KITKARAOKE Agent para Windows — LAB V0.6.1
+# KITKARAOKE Agent para Windows — LAB V0.7.0
 
 Esta versión agrega preparación y transporte real de demos.
 
@@ -9,10 +9,10 @@ Esta versión agrega preparación y transporte real de demos.
 3. Se conecta desde la PC hacia `https://demodj.kitkaraoke.com`.
 4. Recibe búsquedas del Panel DJ sin exponer rutas del disco.
 5. Cuando el DJ pulsa **Preparar demo**:
-   - CDG: recorta el flujo CDG y convierte el audio a AAC 160 kbps;
+   - CDG: recorta el flujo CDG y convierte el audio a AAC 192 kbps;
    - MP4: genera H.264/AAC con `faststart` y perfiles seleccionables AUTO / 360p / 540p / 720p; AUTO inspecciona resolución/FPS/codec, mantiene fuentes de hasta 1280×720 y reduce las mayores sin hacer upscale;
-   - si el CDG usa **YOUTUBE AUTO**, inicia en paralelo una búsqueda del videoclip: prioriza candidato oficial/coincidente y, si no hay uno fiable, usa la mejor coincidencia por visualizaciones cuando ese dato está disponible;
-   - prepara únicamente el tramo del demo como H.264 mudo de máximo 1280×720 y lo sube como fondo opcional a OVH;
+   - si el CDG usa **YOUTUBE AUTO**, inicia en paralelo una búsqueda del videoclip: prioriza candidato oficial/coincidente, descarta karaoke/cover/reaction y solo usa fallback con coincidencia real de artista+título;
+   - prepara únicamente el tramo del demo como video mudo; intenta STREAM_COPY si YouTube entrega H.264 compatible y usa FAST_TRANSCODE solo cuando hace falta (360/540/720 según calidad de fondo);
    - sube el demo principal a una caché temporal de OVH;
    - cada reproducción usa un `traceId`.
 6. La TV descarga el demo principal completo y recién queda en estado **READY**. El fondo YouTube es opcional y no bloquea READY/PLAY: si falla o llega tarde, el karaoke continúa con el fondo generado.
@@ -59,7 +59,7 @@ No se envían tokens ni rutas completas del disco a los logs remotos.
 
 Windows 10/11 con Python 3.11 o superior.
 
-Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.1.zip
+Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.7.0.zip
 
 
 ## Nuevo en V0.6
@@ -80,3 +80,15 @@ Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.1.zip
 - Normaliza nombres con códigos de catálogo como `MRH11-06 - Keane - Bedshaped` para buscar realmente `Keane Bedshaped`.
 - Permite iniciar YouTube AUTO en vivo sobre un CDG ya preparado, sin rehacer CDG/audio.
 - Reporta el fallo del fondo al servidor para permitir reintento controlado sin afectar PLAY.
+
+
+## Nuevo en V0.7.0
+
+- Audio de demos **CDG y MP4 a AAC 192 kbps**.
+- Corrige la limpieza real del query de YouTube: elimina KARAOKE, (Coro), Clean Edit, DJGABO y etiquetas de resolución antes de buscar.
+- Los resultados que contienen **karaoke, cover, reaction, tutorial, slowed, nightcore o instrumental** se descartan como fondo.
+- Fallback por visualizaciones exige coincidencia de artista y cobertura mínima del título.
+- Preferencia por stream **H.264/MP4**. Si ya cabe en la calidad solicitada, usa **STREAM_COPY** y evita recodificar.
+- Si necesita conversión, usa **FAST_TRANSCODE** con preset ultrafast.
+- Calidad del fondo YouTube: Ligero hasta 360p, Normal hasta 540p, Premium hasta 720p.
+- Diagnóstico nuevo: YOUTUBE_BACKGROUND_PREPARE_MODE / STREAM_COPY / FAST_TRANSCODE.
