@@ -1,4 +1,4 @@
-# KITKARAOKE Agent para Windows — LAB V0.5
+# KITKARAOKE Agent para Windows — LAB V0.6
 
 Esta versión agrega preparación y transporte real de demos.
 
@@ -11,9 +11,11 @@ Esta versión agrega preparación y transporte real de demos.
 5. Cuando el DJ pulsa **Preparar demo**:
    - CDG: recorta el flujo CDG y convierte el audio a AAC 160 kbps;
    - MP4: genera H.264/AAC con `faststart` y perfiles seleccionables AUTO / 360p / 540p / 720p; AUTO inspecciona resolución/FPS/codec, mantiene fuentes de hasta 1280×720 y reduce las mayores sin hacer upscale;
-   - sube solo ese demo a una caché temporal de OVH;
+   - si el CDG usa **YOUTUBE AUTO**, inicia en paralelo una búsqueda del videoclip: prioriza candidato oficial/coincidente y, si no hay uno fiable, usa la mejor coincidencia por visualizaciones cuando ese dato está disponible;
+   - prepara únicamente el tramo del demo como H.264 mudo de máximo 1280×720 y lo sube como fondo opcional a OVH;
+   - sube el demo principal a una caché temporal de OVH;
    - cada reproducción usa un `traceId`.
-6. La TV descarga el demo completo y recién queda en estado **READY**.
+6. La TV descarga el demo principal completo y recién queda en estado **READY**. El fondo YouTube es opcional y no bloquea READY/PLAY: si falla o llega tarde, el karaoke continúa con el fondo generado.
 
 ## Diseño anti-lag
 
@@ -34,6 +36,11 @@ El Agent informa eventos como:
 - AGENT_UPLOAD_COMPLETE
 - AGENT_PREPARE_COMPLETE
 - AGENT_PREPARE_ERROR
+- YOUTUBE_BACKGROUND_SEARCH_START
+- YOUTUBE_BACKGROUND_SELECTED
+- YOUTUBE_BACKGROUND_STREAM_RESOLVED
+- YOUTUBE_BACKGROUND_TRANSCODE_READY
+- YOUTUBE_BACKGROUND_FALLBACK
 
 No se envían tokens ni rutas completas del disco a los logs remotos.
 
@@ -52,15 +59,16 @@ No se envían tokens ni rutas completas del disco a los logs remotos.
 
 Windows 10/11 con Python 3.11 o superior.
 
-Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.5.zip
+Paquete LAB: KITKARAOKE_AGENT_WINDOWS_LAB_V0.6.zip
 
 
-## Nuevo en V0.5
+## Nuevo en V0.6
 
-- AUTO usa FFprobe cuando está disponible y un fallback seguro con FFmpeg.
-- Detecta `sourceWidth`, `sourceHeight`, FPS, codec y resolución real del MP4.
-- AUTO conserva la resolución original cuando cabe dentro de 1280×720.
-- AUTO reduce 1080p/1440p/4K a un máximo de 1280×720 conservando aspecto.
-- Guardia anti-upscale: AUTO aborta si una salida supera las dimensiones originales.
-- 360p / 540p / 720p siguen disponibles como perfiles manuales.
-- Logs nuevos: `AGENT_VIDEO_SOURCE_PROBED`, `AGENT_VIDEO_QUALITY_DECISION`, `sourceResolution`, `outputResolution`, `decision`, `transcodeMs`.
+- Motor **YouTube Background AUTO** portado al Agent: el LAB no depende de APP1 en tiempo de ejecución.
+- Búsqueda automática por artista + título con penalización de karaoke, covers, reactions, lyrics y versiones alteradas.
+- Prioridad a candidato oficial/coincidente; fallback a la coincidencia con mayor número de vistas disponible.
+- Resolver independiente con `yt-dlp` y fallbacks DEFAULT / ANDROID_VR / WEB_SAFARI.
+- Video de fondo mudo, máximo 1280×720, H.264/yuv420p/`faststart`.
+- Preparación de fondo en hilo independiente: un fallo de YouTube nunca cancela el CDG.
+- Puede usar opcionalmente `cookies.txt` junto a `agent.py`; no se incluye ni se sube ningún cookie en el paquete.
+- Se mantienen las mejoras V0.5 de AUTO MP4 sin upscale.
