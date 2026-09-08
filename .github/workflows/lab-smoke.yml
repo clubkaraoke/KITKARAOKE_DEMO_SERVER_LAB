@@ -65,7 +65,7 @@ jobs:
           grep -q 'TV_PRELOAD_RETRY' public/tv.html
           grep -q 'TV_PLAY_ABORTED_BY_LOAD' public/tv.html
           grep -q 'TV_VIDEO_FREEZE' public/tv.html
-          grep -q 'LAB-TV-4.2' public/tv.html
+          grep -q 'LAB-TV-4.3' public/tv.html
           grep -q 'SDF_FRAME_MIN_MS = 25' public/tv.html
           grep -q 'TV_LOAD_HANDLER_ERROR' public/tv.html
           grep -q 'TV_JS_ERROR' public/tv.html
@@ -92,7 +92,7 @@ jobs:
           grep -q 'data-video-quality="720"' public/dj.html
           grep -q 'transparentBackground' public/sdf-renderer.js
           grep -q 'transparentBackground' public/sdf-karaoke-pro-renderer.js
-          grep -q 'APP_VERSION = "0.5.0"' agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.6.0"' agent/windows/agent.py
           grep -q '"videoQualities": \["auto", "360", "540", "720"\]' agent/windows/agent.py
           grep -q '"smartAutoResolution": True' agent/windows/agent.py
           grep -q 'AGENT_VIDEO_SOURCE_PROBED' agent/windows/agent.py
@@ -103,6 +103,34 @@ jobs:
           grep -q "min(1280,iw)" agent/windows/agent.py
           grep -q "min(720,ih)" agent/windows/agent.py
           grep -q 'Descargar TXT' public/dj.html
+          grep -q 'data-bg="youtube-auto"' public/dj.html
+          grep -q 'youtubeBlur' public/dj.html
+          grep -q 'youtubeShade' public/dj.html
+          grep -q 'player:background' src/server-v3.js
+          grep -q 'YOUTUBE_BACKGROUND_READY' src/server-v3.js
+          grep -q 'TV_YOUTUBE_BACKGROUND_READY' public/tv.html
+          grep -q 'TV_YOUTUBE_BACKGROUND_FALLBACK' public/tv.html
+          grep -q 'YOUTUBE_BACKGROUND_SEARCH_START' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_SELECTED' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_STREAM_RESOLVED' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_TRANSCODE_READY' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_FALLBACK' agent/windows/agent.py
+          grep -q 'youtubeBackgroundNonBlocking' agent/windows/agent.py
+          grep -q '^yt-dlp' agent/windows/requirements.txt
+          grep -q 'tv-youtube-bg' public/app.css
+          grep -q 'youtubeBgVideo' public/tv.html
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('src/server-v3.js').read_text(encoding='utf-8')
+          start=s.index('function expectedKinds')
+          end=s.index('function createMediaJob', start)
+          block=s[start:end]
+          assert '["cdg", "audio"]' in block, 'YouTube background must not become a required CDG part'
+          assert 'optional:' in s and '["background"]' in s, 'optional background contract missing'
+          tv=Path('public/tv.html').read_text(encoding='utf-8')
+          assert 'loadYoutubeBackground(' in tv
+          assert 'karaokeContinues: true' in tv
+          PY
 
       - name: Start server
         run: |
