@@ -86,7 +86,7 @@
   <script src="/sdf-karaoke-pro-renderer.js"></script>
   <script src="/cdg-engine-lite.js"></script>
   <script>
-    const TV_CLIENT_VERSION = "LAB-TV-4.3";
+    const TV_CLIENT_VERSION = "LAB-TV-4.4";
     const TRANSPORT_MODE = "HTTP_PRELOAD";
     const socket = io({
       reconnection: true,
@@ -1764,6 +1764,36 @@
         ...telemetrySnapshot()
       });
     }, 5000);
+
+    let clientVersionCheckInFlight = false;
+    async function checkClientVersion() {
+      if (clientVersionCheckInFlight) return;
+      clientVersionCheckInFlight = true;
+      try {
+        const response = await fetch("/api/client-version?ts=" + Date.now(), {
+          cache: "no-store"
+        });
+        if (!response.ok) return;
+        const info = await response.json();
+        const expected = String(info.tv || "");
+        if (expected && expected !== TV_CLIENT_VERSION) {
+          localLog("TV_CLIENT_UPDATE_REQUIRED", {
+            currentVersion: TV_CLIENT_VERSION,
+            expectedVersion: expected
+          });
+          const url = new URL(location.href);
+          url.searchParams.set("client", expected);
+          location.replace(url.toString());
+        }
+      } catch (_) {
+        // La verificación de versión nunca interrumpe reproducción.
+      } finally {
+        clientVersionCheckInFlight = false;
+      }
+    }
+
+    setTimeout(checkClientVersion, 1200);
+    setInterval(checkClientVersion, 60000);
 
     resizeBackground();
     startBackground();
