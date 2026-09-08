@@ -24,7 +24,7 @@ import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
@@ -366,6 +366,8 @@ class AgentApp:
             "youtubeSearch": bool(self.ytdlp_available),
             "youtubeBackgroundMaxResolution": "1280x720",
             "youtubeBackgroundMuted": True,
+            "youtubeResolverDrainSafe": True,
+            "youtubeLivePrepare": True,
             "transportMode": "HTTP_PRELOAD",
             "fullPreloadRecommended": True,
             "version": APP_VERSION,
@@ -1020,7 +1022,6 @@ class AgentApp:
         if not self.ytdlp_available:
             raise RuntimeError("YTDLP_NOT_AVAILABLE")
         command = self._youtube_base_args() + args
-        started = time.monotonic()
         process = subprocess.Popen(
             command,
             stdout=subprocess.PIPE,
@@ -1030,26 +1031,39 @@ class AgentApp:
             errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
-        while process.poll() is None:
+        deadline = time.monotonic() + max(1, timeout)
+        stdout = ""
+        stderr = ""
+        while True:
             if trace_id and self.is_cancelled(trace_id):
-                try:
-                    process.terminate()
-                    process.wait(timeout=2)
-                except Exception:
-                    try:
-                        process.kill()
-                    except Exception:
-                        pass
-                raise RuntimeError("PREPARE_SUPERSEDED")
-            if time.monotonic() - started > timeout:
                 try:
                     process.kill()
                 except Exception:
                     pass
-                raise RuntimeError("YTDLP_TIMEOUT")
-            time.sleep(0.10)
-
-        stdout, stderr = process.communicate()
+                try:
+                    process.communicate(timeout=2)
+                except Exception:
+                    pass
+                raise RuntimeError("PREPARE_SUPERSEDED")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                try:
+                    process.kill()
+                except Exception:
+                    pass
+                try:
+                    stdout, stderr = process.communicate(timeout=2)
+                except Exception:
+                    pass
+                detail = " ".join((stderr or stdout or "").split())[-600:]
+                raise RuntimeError("YTDLP_TIMEOUT" + (" · " + detail if detail else ""))
+            try:
+                # communicate() drena stdout/stderr mientras espera. Así yt-dlp no
+                # puede quedar bloqueado por llenar el pipe con JSON de resultados.
+                stdout, stderr = process.communicate(timeout=min(0.35, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
         if process.returncode != 0 or not (stdout or "").strip():
             detail = " ".join((stderr or stdout or "yt-dlp error").split())
             raise RuntimeError(detail[-1200:])
@@ -1322,6 +1336,31 @@ class AgentApp:
                 parsed_artist, parsed_title = parse_artist_title(str(media.get("title") or ""))
                 artist = artist or parsed_artist
                 song_title = parsed_title
+
+            # Muchos catálogos comerciales tienen un código de disco/pista antes
+            # del artista real: "MRH11-06 - Keane - Bedshaped". Si el primer
+            # campo parece código, reparseamos "Keane - Bedshaped" para no
+            # contaminar la búsqueda YouTube con MRH11-06/SF249-09/etc.
+            compact_artist = re.sub(r"[^A-Za-z0-9-]", "", artist)
+            looks_catalog_code = bool(
+                re.fullmatch(r"[A-Za-z]{1,10}\d{1,6}(?:-\d{1,3})?", compact_artist)
+                or re.fullmatch(r"[A-Za-z]{1,8}\d{1,6}-\d{1,3}", compact_artist)
+            )
+            nested_artist, nested_title = parse_artist_title(song_title)
+            if looks_catalog_code and nested_artist and nested_title:
+                self.emit_diag(
+                    trace_id,
+                    "YOUTUBE_BACKGROUND_QUERY_NORMALIZED",
+                    {
+                        "catalogCode": artist[:40],
+                        "artist": nested_artist[:160],
+                        "songTitle": nested_title[:220],
+                    },
+                    room_code=room_code,
+                )
+                artist = nested_artist
+                song_title = nested_title
+
             selected = self.search_youtube_background(
                 artist,
                 song_title,
@@ -1426,17 +1465,29 @@ class AgentApp:
                     room_code=room_code,
                 )
                 return
+            error_text = str(exc)[-1200:]
             self.emit_diag(
                 trace_id,
                 "YOUTUBE_BACKGROUND_FALLBACK",
                 {
-                    "error": str(exc)[-1200:],
+                    "error": error_text,
                     "fallback": "GENERATED_BACKGROUND",
                     "karaokeContinues": True,
                 },
                 level="warn",
                 room_code=room_code,
             )
+            try:
+                self.sio.emit(
+                    "agent:background:error",
+                    {
+                        "traceId": trace_id,
+                        "error": error_text,
+                        "retryable": True,
+                    },
+                )
+            except Exception:
+                pass
 
     def upload_part(
         self,
@@ -1728,6 +1779,48 @@ class AgentApp:
                         )
                         return
                     self.prepare_media(data)
+
+            threading.Thread(target=worker, daemon=True).start()
+
+        @self.sio.on("agent:background:prepare")
+        def on_background_prepare(payload):
+            data = payload or {}
+            trace_id = str(data.get("traceId") or "")
+            room_code = str(data.get("roomCode") or "")
+            media = data.get("media") or {}
+            duration = int(data.get("duration") or 45)
+            upload_url = str(data.get("uploadUrl") or "")
+            upload_token = str(data.get("uploadToken") or "")
+            if not trace_id or not upload_url or not upload_token:
+                self.emit_diag(
+                    trace_id,
+                    "YOUTUBE_BACKGROUND_LIVE_REQUEST_INVALID",
+                    {"hasUploadUrl": bool(upload_url), "hasToken": bool(upload_token)},
+                    level="warn",
+                    room_code=room_code,
+                )
+                return
+
+            def worker():
+                # El mismo lock del prepare principal evita pelear por FFmpeg/CPU.
+                with self.prepare_lock:
+                    if self.is_cancelled(trace_id):
+                        return
+                    self.emit_diag(
+                        trace_id,
+                        "YOUTUBE_BACKGROUND_LIVE_REQUEST_START",
+                        {"reason": str(data.get("reason") or "panel-live")},
+                        room_code=room_code,
+                    )
+                    self.prepare_youtube_background(
+                        dict(media),
+                        duration,
+                        upload_url,
+                        upload_token,
+                        trace_id,
+                        room_code,
+                        None,
+                    )
 
             threading.Thread(target=worker, daemon=True).start()
 
