@@ -128,18 +128,41 @@
       this.processedPacket = 0;
       this.lastRenderAt = 0;
       this.onFrame = typeof onFrame === "function" ? onFrame : null;
-      this.transparentBackground = false;
+
+      // "auto": elimina fondos grandes conectados al borde.
+      // "force": umbral más agresivo.
+      // "original": conserva exactamente el fondo del CDG.
+      this.transparencyMode = "auto";
+      this.transparentBackground = true;
+
       this.renderCount = 0;
       this.totalRenderMs = 0;
       this.maxRenderMs = 0;
       this.visibleIndex = new Uint8Array(VISIBLE_W * VISIBLE_H);
       this.backgroundMask = new Uint8Array(VISIBLE_W * VISIBLE_H);
-      this.backgroundStack = new Int32Array(VISIBLE_W * VISIBLE_H);
+      this.componentStack = new Int32Array(VISIBLE_W * VISIBLE_H);
+      this.visitStamp = new Uint32Array(VISIBLE_W * VISIBLE_H);
+      this.visitRevision = 1;
+      this.backgroundAnalysis = {
+        mode: "auto",
+        status: "pending",
+        candidateComponents: 0,
+        removedComponents: 0,
+        removedPixels: 0,
+        removedCoverage: 0,
+        dominantColorIndex: null,
+        dominantColorRgb: null,
+        memoryColorIndex: 0
+      };
+      this.backgroundAnalysisSignature = "";
+      this.backgroundAnalysisRevision = 0;
     }
 
     load(bytes) {
       this.data = bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes);
       this.resetMetrics();
+      this.backgroundAnalysisSignature = "";
+      this.backgroundAnalysisRevision = 0;
       this.reset();
       this.processTo(1);
       this.render(true);
@@ -189,6 +212,126 @@
       };
     }
 
+    _nextVisitRevision() {
+      this.visitRevision += 1;
+      if (this.visitRevision >= 0xffffffff) {
+        this.visitStamp.fill(0);
+        this.visitRevision = 1;
+      }
+      return this.visitRevision;
+    }
+
+    _buildBackgroundMask() {
+      this.backgroundMask.fill(0);
+
+      const mode = this.transparencyMode;
+      const totalPixels = this.visibleIndex.length;
+      const memoryColor = this.decoder.memoryColor & 0x0f;
+
+      if (mode === "original") {
+        return {
+          mode,
+          status: "skipped-original",
+          candidateComponents: 0,
+          removedComponents: 0,
+          removedPixels: 0,
+          removedCoverage: 0,
+          dominantColorIndex: null,
+          dominantColorRgb: null,
+          memoryColorIndex: memoryColor
+        };
+      }
+
+      const revision = this._nextVisitRevision();
+      const autoThreshold = Math.max(320, Math.round(totalPixels * 0.025));
+      const forceThreshold = Math.max(96, Math.round(totalPixels * 0.004));
+      const threshold = mode === "force" ? forceThreshold : autoThreshold;
+
+      let candidateComponents = 0;
+      let removedComponents = 0;
+      let removedPixels = 0;
+      let dominantSize = 0;
+      let dominantColorIndex = null;
+
+      const visitComponent = (seed) => {
+        if (this.visitStamp[seed] === revision) return;
+        const color = this.visibleIndex[seed] & 0x0f;
+        let read = 0;
+        let write = 0;
+        this.componentStack[write++] = seed;
+        this.visitStamp[seed] = revision;
+
+        while (read < write) {
+          const idx = this.componentStack[read++];
+          const x = idx % VISIBLE_W;
+          const y = (idx / VISIBLE_W) | 0;
+
+          const add = (next) => {
+            if (
+              this.visitStamp[next] !== revision &&
+              (this.visibleIndex[next] & 0x0f) === color
+            ) {
+              this.visitStamp[next] = revision;
+              this.componentStack[write++] = next;
+            }
+          };
+
+          if (x > 0) add(idx - 1);
+          if (x + 1 < VISIBLE_W) add(idx + 1);
+          if (y > 0) add(idx - VISIBLE_W);
+          if (y + 1 < VISIBLE_H) add(idx + VISIBLE_W);
+        }
+
+        candidateComponents += 1;
+        const accept =
+          color === memoryColor ||
+          write >= threshold;
+
+        if (!accept) return;
+
+        removedComponents += 1;
+        removedPixels += write;
+        if (write > dominantSize) {
+          dominantSize = write;
+          dominantColorIndex = color;
+        }
+        for (let i = 0; i < write; i += 1) {
+          this.backgroundMask[this.componentStack[i]] = 1;
+        }
+      };
+
+      // Solo analizamos regiones que tocan el borde. Esto evita borrar letras
+      // interiores aunque compartan un color con el fondo.
+      for (let x = 0; x < VISIBLE_W; x += 1) {
+        visitComponent(x);
+        visitComponent((VISIBLE_H - 1) * VISIBLE_W + x);
+      }
+      for (let y = 1; y < VISIBLE_H - 1; y += 1) {
+        visitComponent(y * VISIBLE_W);
+        visitComponent(y * VISIBLE_W + VISIBLE_W - 1);
+      }
+
+      const coverage = totalPixels ? removedPixels / totalPixels : 0;
+      const dominantRgba = dominantColorIndex == null
+        ? null
+        : (this.decoder.palette[dominantColorIndex] || [0, 0, 0, 255]);
+
+      return {
+        mode,
+        status: removedPixels > 0 ? "applied" : "no-safe-background",
+        candidateComponents,
+        removedComponents,
+        removedPixels,
+        removedCoverage: Number(coverage.toFixed(4)),
+        dominantColorIndex,
+        dominantColorRgb: dominantRgba
+          ? [dominantRgba[0], dominantRgba[1], dominantRgba[2]]
+          : null,
+        memoryColorIndex: memoryColor,
+        thresholdPixels: threshold
+      };
+    }
+
     render(force) {
       if (!this.data && !force) return;
       const started = performance.now();
@@ -205,41 +348,28 @@
         }
       }
 
-      this.backgroundMask.fill(0);
-      if (this.transparentBackground) {
-        const bg = this.decoder.memoryColor & 0x0f;
-        let top = 0;
-        const push = (idx) => {
-          if (this.backgroundMask[idx] || this.visibleIndex[idx] !== bg) return;
-          this.backgroundMask[idx] = 1;
-          this.backgroundStack[top++] = idx;
-        };
-        for (let x = 0; x < VISIBLE_W; x += 1) {
-          push(x);
-          push((VISIBLE_H - 1) * VISIBLE_W + x);
-        }
-        for (let y = 1; y < VISIBLE_H - 1; y += 1) {
-          push(y * VISIBLE_W);
-          push(y * VISIBLE_W + VISIBLE_W - 1);
-        }
-        while (top > 0) {
-          const idx = this.backgroundStack[--top];
-          const x = idx % VISIBLE_W;
-          const y = (idx / VISIBLE_W) | 0;
-          if (x > 0) push(idx - 1);
-          if (x + 1 < VISIBLE_W) push(idx + 1);
-          if (y > 0) push(idx - VISIBLE_W);
-          if (y + 1 < VISIBLE_H) push(idx + VISIBLE_W);
-        }
+      const analysis = this._buildBackgroundMask();
+      const signature = [
+        analysis.mode,
+        analysis.status,
+        analysis.dominantColorIndex == null ? "x" : analysis.dominantColorIndex,
+        Math.round((analysis.removedCoverage || 0) * 20)
+      ].join(":");
+      const analysisChanged = signature !== this.backgroundAnalysisSignature;
+      if (analysisChanged) {
+        this.backgroundAnalysisSignature = signature;
+        this.backgroundAnalysisRevision += 1;
       }
+      this.backgroundAnalysis = analysis;
 
+      const useTransparency = this.transparencyMode !== "original";
       for (let i = 0; i < this.visibleIndex.length; i += 1) {
         const index = this.visibleIndex[i];
         const rgba = this.decoder.palette[index] || [0, 0, 0, 255];
         out[o] = rgba[0];
         out[o + 1] = rgba[1];
         out[o + 2] = rgba[2];
-        out[o + 3] = this.transparentBackground && this.backgroundMask[i] ? 0 : 255;
+        out[o + 3] = useTransparency && this.backgroundMask[i] ? 0 : 255;
         o += 4;
       }
 
@@ -253,16 +383,32 @@
           force: Boolean(force),
           packet: this.processedPacket,
           renderMs: Number(renderMs.toFixed(3)),
-          transparentBackground: this.transparentBackground
+          transparentBackground: useTransparency,
+          transparencyMode: this.transparencyMode,
+          backgroundAnalysis: this.backgroundAnalysis,
+          backgroundAnalysisRevision: this.backgroundAnalysisRevision,
+          backgroundAnalysisChanged: analysisChanged
         });
       }
     }
 
-    setTransparentBackground(enabled) {
-      const next = Boolean(enabled);
-      if (next === this.transparentBackground) return;
-      this.transparentBackground = next;
+    setTransparencyMode(mode) {
+      const normalized = ["auto", "original", "force"].includes(String(mode || "").toLowerCase())
+        ? String(mode).toLowerCase()
+        : "auto";
+      if (normalized === this.transparencyMode) return;
+      this.transparencyMode = normalized;
+      this.transparentBackground = normalized !== "original";
+      this.backgroundAnalysisSignature = "";
       this.render(true);
+    }
+
+    setTransparentBackground(enabled) {
+      this.setTransparencyMode(enabled ? "auto" : "original");
+    }
+
+    getBackgroundAnalysis() {
+      return { ...this.backgroundAnalysis };
     }
 
     getMetrics() {
@@ -270,7 +416,9 @@
         renderCount: this.renderCount,
         avgRenderMs: this.renderCount ? Number((this.totalRenderMs / this.renderCount).toFixed(3)) : 0,
         maxRenderMs: Number(this.maxRenderMs.toFixed(3)),
-        transparentBackground: this.transparentBackground,
+        transparentBackground: this.transparencyMode !== "original",
+        transparencyMode: this.transparencyMode,
+        backgroundAnalysis: { ...this.backgroundAnalysis },
         processedPacket: this.processedPacket
       };
     }
