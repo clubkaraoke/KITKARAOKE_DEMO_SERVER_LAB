@@ -430,8 +430,9 @@
         const r = rgba[p] / 255;
         const g = rgba[p + 1] / 255;
         const b = rgba[p + 2] / 255;
+        const a = rgba[p + 3] / 255;
         const lum = r * 0.2126 + g * 0.7152 + b * 0.0722;
-        const value = lum >= threshold ? 255 : 0;
+        const value = a > 0.05 && lum >= threshold ? 255 : 0;
         this.rawMask[i] = value;
         if (!changed && value !== this.lastRawMask[i]) changed = true;
       }
