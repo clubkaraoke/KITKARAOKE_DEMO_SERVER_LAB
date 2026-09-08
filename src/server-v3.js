@@ -293,6 +293,13 @@ function safeYoutubeBackgroundMeta(value) {
     sourceHeight: Number.isFinite(Number(src.sourceHeight)) ? Math.max(0, Number(src.sourceHeight)) : null,
     outputWidth: Number.isFinite(Number(src.outputWidth)) ? Math.max(0, Number(src.outputWidth)) : null,
     outputHeight: Number.isFinite(Number(src.outputHeight)) ? Math.max(0, Number(src.outputHeight)) : null,
+    outputFps: Number.isFinite(Number(src.outputFps)) ? Math.max(0, Number(src.outputFps)) : null,
+    sourceCodec: String(src.sourceCodec || "").slice(0, 80),
+    resolverMode: String(src.resolverMode || "").slice(0, 40),
+    prepareMode: String(src.prepareMode || "").slice(0, 40),
+    backgroundQuality: String(src.backgroundQuality || "").slice(0, 20),
+    targetHeight: Number.isFinite(Number(src.targetHeight)) ? Math.max(0, Number(src.targetHeight)) : null,
+    bytes: Number.isFinite(Number(src.bytes)) ? Math.max(0, Number(src.bytes)) : null,
     elapsedMs: Number.isFinite(Number(src.elapsedMs)) ? Math.max(0, Number(src.elapsedMs)) : null
   };
 }
