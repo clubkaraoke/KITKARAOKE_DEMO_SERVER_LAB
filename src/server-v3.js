@@ -48,6 +48,7 @@ const rooms = new Map();
 const agents = new Map();
 const pendingSearches = new Map();
 const mediaJobs = new Map();
+const hybridJobs = new Map();
 const roomDiagnostics = new Map();
 
 fs.mkdirSync(MEDIA_DIR, { recursive: true });
@@ -495,6 +496,155 @@ function requestYoutubeBackground(job, room, reason = "panel-live") {
   }, job.traceId);
   return true;
 }
+
+// KITKARAOKE_MP4LAB_HYBRID_BRIDGE_V1
+function validMp4LabHybridUrl(value, jobId, suffix) {
+  try {
+    const u = new URL(String(value || ""));
+    return u.protocol === "https:" &&
+      u.hostname === "panel.kitkaraoke.com" &&
+      u.pathname === "/mp4-lab/api/jobs/" + jobId + "/background/" + suffix;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function pickHybridAgent(preferredCode = "") {
+  const preferred = normalizeCode(preferredCode);
+  const now = Date.now();
+  const usable = (agent) => Boolean(
+    agent && agent.socketId &&
+    now - Number(agent.lastSeen || 0) < 65000 &&
+    agent.capabilities && agent.capabilities.youtubeBackgroundAuto
+  );
+  if (preferred) {
+    const agent = agents.get(preferred);
+    if (usable(agent)) return agent;
+  }
+  return [...agents.values()]
+    .filter(usable)
+    .sort((a, b) => Number(b.lastSeen || 0) - Number(a.lastSeen || 0))[0] || null;
+}
+
+async function verifyMp4LabHybridTicket(verifyUrl, uploadToken) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const response = await fetch(verifyUrl, {
+      method: "GET",
+      headers: { "X-Upload-Token": uploadToken },
+      signal: controller.signal
+    });
+    if (!response.ok) return false;
+    const body = await response.json().catch(() => ({}));
+    return Boolean(body && body.ok === true && body.authorized === true);
+  } catch (_error) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function notifyMp4LabHybrid(job, payload) {
+  if (!job || !job.callbackUrl || !job.uploadToken) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    await fetch(job.callbackUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Upload-Token": job.uploadToken
+      },
+      body: JSON.stringify(payload || {}),
+      signal: controller.signal
+    });
+  } catch (error) {
+    log("mp4lab_hybrid_callback_error", {
+      traceId: job.traceId,
+      jobId: job.jobId,
+      error: String(error && error.message ? error.message : error)
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.post("/api/hybrid/mp4-background/request", async (req, res) => {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const jobId = String(body.jobId || "").trim().toUpperCase();
+  const artist = String(body.artist || "").trim().slice(0, 160);
+  const title = String(body.title || "").trim().slice(0, 220);
+  const uploadUrl = String(body.uploadUrl || "").trim();
+  const verifyUrl = String(body.verifyUrl || "").trim();
+  const callbackUrl = String(body.callbackUrl || "").trim();
+  const uploadToken = String(body.uploadToken || "").trim();
+  const duration = Math.max(15, Math.min(900, Math.ceil(Number(body.duration || 240))));
+
+  if (!/^[A-Z0-9_.-]{1,96}$/.test(jobId) || !title) {
+    return res.status(400).json({ ok: false, error: "INVALID_MP4LAB_JOB" });
+  }
+  if (uploadToken.length < 32 || uploadToken.length > 200) {
+    return res.status(400).json({ ok: false, error: "INVALID_UPLOAD_TOKEN" });
+  }
+  if (!validMp4LabHybridUrl(uploadUrl, jobId, "hybrid-upload") ||
+      !validMp4LabHybridUrl(verifyUrl, jobId, "hybrid-ticket") ||
+      !validMp4LabHybridUrl(callbackUrl, jobId, "hybrid-result")) {
+    return res.status(400).json({ ok: false, error: "INVALID_MP4LAB_CALLBACK" });
+  }
+
+  const ticketOk = await verifyMp4LabHybridTicket(verifyUrl, uploadToken);
+  if (!ticketOk) {
+    return res.status(403).json({ ok: false, error: "MP4LAB_TICKET_REJECTED" });
+  }
+
+  const agent = pickHybridAgent(body.agentCode || "");
+  if (!agent) {
+    return res.status(503).json({ ok: false, error: "AGENT_OFFLINE", agentsOnline: agents.size });
+  }
+
+  const traceId = "MP4LAB-" + jobId + "-" + crypto.randomUUID();
+  const job = {
+    traceId, jobId, agentCode: agent.code,
+    uploadUrl, verifyUrl, callbackUrl, uploadToken,
+    artist, title, duration,
+    status: "requested", createdAt: Date.now(), updatedAt: Date.now()
+  };
+  hybridJobs.set(traceId, job);
+  const cleanup = setTimeout(() => hybridJobs.delete(traceId), 30 * 60 * 1000);
+  if (cleanup.unref) cleanup.unref();
+
+  io.to(agent.socketId).emit("agent:background:prepare", {
+    traceId,
+    roomCode: "MP4LAB",
+    media: {
+      id: jobId,
+      title: (artist ? artist + " - " : "") + title,
+      artist,
+      songTitle: title,
+      format: "CDG",
+      cdgBackground: "youtube-auto",
+      youtubeBackground: true,
+      backgroundQuality: "normal",
+      source: "MP4_LAB_HYBRID"
+    },
+    duration,
+    uploadToken,
+    uploadUrl,
+    reason: "mp4-lab-hybrid"
+  });
+
+  log("mp4lab_hybrid_request_sent", {
+    traceId, jobId, agentCode: agent.code, duration, artist, title
+  });
+
+  return res.status(202).json({
+    ok: true,
+    state: "preparing",
+    traceId,
+    agent: publicAgentState(agent.code)
+  });
+});
 
 app.get("/health", (_req, res) => {
   res.json({
@@ -1025,6 +1175,18 @@ io.on("connection", (socket) => {
 
   socket.on("agent:background:complete", (payload = {}, ack = () => {}) => {
     const traceId = String(payload.traceId || "");
+    const hybrid = hybridJobs.get(traceId);
+    if (hybrid) {
+      if (socket.data.role !== "agent" || socket.data.agentCode !== hybrid.agentCode) {
+        return ack({ ok: false, error: "HYBRID_BACKGROUND_AGENT_INVALID" });
+      }
+      const meta = safeYoutubeBackgroundMeta(payload.background || {});
+      hybrid.status = "ready";
+      hybrid.updatedAt = Date.now();
+      void notifyMp4LabHybrid(hybrid, { ok: true, state: "ready", traceId, background: meta });
+      log("mp4lab_hybrid_background_ready", { traceId, jobId: hybrid.jobId, agentCode: hybrid.agentCode, background: meta });
+      return ack({ ok: true, hybrid: true });
+    }
     const job = mediaJobs.get(traceId);
     if (!job || socket.data.role !== "agent" || socket.data.agentCode !== job.agentCode) {
       return ack({ ok: false, error: "BACKGROUND_JOB_INVALID" });
@@ -1065,6 +1227,18 @@ io.on("connection", (socket) => {
 
   socket.on("agent:background:error", (payload = {}, ack = () => {}) => {
     const traceId = String(payload.traceId || "");
+    const hybrid = hybridJobs.get(traceId);
+    if (hybrid) {
+      if (socket.data.role !== "agent" || socket.data.agentCode !== hybrid.agentCode) {
+        return ack({ ok: false, error: "HYBRID_BACKGROUND_AGENT_INVALID" });
+      }
+      const error = String(payload.error || "YouTube background failed").slice(-1200);
+      hybrid.status = "error";
+      hybrid.updatedAt = Date.now();
+      void notifyMp4LabHybrid(hybrid, { ok: false, state: "error", traceId, error });
+      log("mp4lab_hybrid_background_error", { traceId, jobId: hybrid.jobId, agentCode: hybrid.agentCode, error });
+      return ack({ ok: true, hybrid: true });
+    }
     const job = mediaJobs.get(traceId);
     if (!job || socket.data.role !== "agent" || socket.data.agentCode !== job.agentCode) {
       return ack({ ok: false, error: "BACKGROUND_JOB_INVALID" });
