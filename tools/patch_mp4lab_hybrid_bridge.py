@@ -1,0 +1,185 @@
+from pathlib import Path
+
+p = Path('src/server-v3.js')
+s = p.read_text(encoding='utf-8')
+marker = 'KITKARAOKE_MP4LAB_HYBRID_BRIDGE_V1'
+
+if marker in s:
+    print('Bridge already present.')
+    raise SystemExit(0)
+
+old = '''const pendingSearches = new Map();\nconst mediaJobs = new Map();\nconst roomDiagnostics = new Map();'''
+new = '''const pendingSearches = new Map();\nconst mediaJobs = new Map();\nconst hybridJobs = new Map();\nconst roomDiagnostics = new Map();'''
+if old not in s:
+    raise SystemExit('maps anchor not found')
+s = s.replace(old, new, 1)
+
+anchor = '''app.get("/health", (_req, res) => {'''
+block = r'''// KITKARAOKE_MP4LAB_HYBRID_BRIDGE_V1
+function validMp4LabHybridUrl(value, jobId, suffix) {
+  try {
+    const u = new URL(String(value || ""));
+    return u.protocol === "https:" &&
+      u.hostname === "panel.kitkaraoke.com" &&
+      u.pathname === "/mp4-lab/api/jobs/" + jobId + "/background/" + suffix;
+  } catch (_error) {
+    return false;
+  }
+}
+
+function pickHybridAgent(preferredCode = "") {
+  const preferred = normalizeCode(preferredCode);
+  const now = Date.now();
+  const usable = (agent) => Boolean(
+    agent && agent.socketId &&
+    now - Number(agent.lastSeen || 0) < 65000 &&
+    agent.capabilities && agent.capabilities.youtubeBackgroundAuto
+  );
+  if (preferred) {
+    const agent = agents.get(preferred);
+    if (usable(agent)) return agent;
+  }
+  return [...agents.values()]
+    .filter(usable)
+    .sort((a, b) => Number(b.lastSeen || 0) - Number(a.lastSeen || 0))[0] || null;
+}
+
+async function verifyMp4LabHybridTicket(verifyUrl, uploadToken) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const response = await fetch(verifyUrl, {
+      method: "GET",
+      headers: { "X-Upload-Token": uploadToken },
+      signal: controller.signal
+    });
+    if (!response.ok) return false;
+    const body = await response.json().catch(() => ({}));
+    return Boolean(body && body.ok === true && body.authorized === true);
+  } catch (_error) {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function notifyMp4LabHybrid(job, payload) {
+  if (!job || !job.callbackUrl || !job.uploadToken) return;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    await fetch(job.callbackUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Upload-Token": job.uploadToken
+      },
+      body: JSON.stringify(payload || {}),
+      signal: controller.signal
+    });
+  } catch (error) {
+    log("mp4lab_hybrid_callback_error", {
+      traceId: job.traceId,
+      jobId: job.jobId,
+      error: String(error && error.message ? error.message : error)
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+app.post("/api/hybrid/mp4-background/request", async (req, res) => {
+  const body = req.body && typeof req.body === "object" ? req.body : {};
+  const jobId = String(body.jobId || "").trim().toUpperCase();
+  const artist = String(body.artist || "").trim().slice(0, 160);
+  const title = String(body.title || "").trim().slice(0, 220);
+  const uploadUrl = String(body.uploadUrl || "").trim();
+  const verifyUrl = String(body.verifyUrl || "").trim();
+  const callbackUrl = String(body.callbackUrl || "").trim();
+  const uploadToken = String(body.uploadToken || "").trim();
+  const duration = Math.max(15, Math.min(900, Math.ceil(Number(body.duration || 240))));
+
+  if (!/^[A-Z0-9_.-]{1,96}$/.test(jobId) || !title) {
+    return res.status(400).json({ ok: false, error: "INVALID_MP4LAB_JOB" });
+  }
+  if (uploadToken.length < 32 || uploadToken.length > 200) {
+    return res.status(400).json({ ok: false, error: "INVALID_UPLOAD_TOKEN" });
+  }
+  if (!validMp4LabHybridUrl(uploadUrl, jobId, "hybrid-upload") ||
+      !validMp4LabHybridUrl(verifyUrl, jobId, "hybrid-ticket") ||
+      !validMp4LabHybridUrl(callbackUrl, jobId, "hybrid-result")) {
+    return res.status(400).json({ ok: false, error: "INVALID_MP4LAB_CALLBACK" });
+  }
+
+  const ticketOk = await verifyMp4LabHybridTicket(verifyUrl, uploadToken);
+  if (!ticketOk) {
+    return res.status(403).json({ ok: false, error: "MP4LAB_TICKET_REJECTED" });
+  }
+
+  const agent = pickHybridAgent(body.agentCode || "");
+  if (!agent) {
+    return res.status(503).json({ ok: false, error: "AGENT_OFFLINE", agentsOnline: agents.size });
+  }
+
+  const traceId = "MP4LAB-" + jobId + "-" + crypto.randomUUID();
+  const job = {
+    traceId, jobId, agentCode: agent.code,
+    uploadUrl, verifyUrl, callbackUrl, uploadToken,
+    artist, title, duration,
+    status: "requested", createdAt: Date.now(), updatedAt: Date.now()
+  };
+  hybridJobs.set(traceId, job);
+  const cleanup = setTimeout(() => hybridJobs.delete(traceId), 30 * 60 * 1000);
+  if (cleanup.unref) cleanup.unref();
+
+  io.to(agent.socketId).emit("agent:background:prepare", {
+    traceId,
+    roomCode: "MP4LAB",
+    media: {
+      id: jobId,
+      title: (artist ? artist + " - " : "") + title,
+      artist,
+      songTitle: title,
+      format: "CDG",
+      cdgBackground: "youtube-auto",
+      youtubeBackground: true,
+      backgroundQuality: "normal",
+      source: "MP4_LAB_HYBRID"
+    },
+    duration,
+    uploadToken,
+    uploadUrl,
+    reason: "mp4-lab-hybrid"
+  });
+
+  log("mp4lab_hybrid_request_sent", {
+    traceId, jobId, agentCode: agent.code, duration, artist, title
+  });
+
+  return res.status(202).json({
+    ok: true,
+    state: "preparing",
+    traceId,
+    agent: publicAgentState(agent.code)
+  });
+});
+
+'''
+if anchor not in s:
+    raise SystemExit('health anchor not found')
+s = s.replace(anchor, block + anchor, 1)
+
+old = '''  socket.on("agent:background:complete", (payload = {}, ack = () => {}) => {\n    const traceId = String(payload.traceId || "");\n    const job = mediaJobs.get(traceId);'''
+new = '''  socket.on("agent:background:complete", (payload = {}, ack = () => {}) => {\n    const traceId = String(payload.traceId || "");\n    const hybrid = hybridJobs.get(traceId);\n    if (hybrid) {\n      if (socket.data.role !== "agent" || socket.data.agentCode !== hybrid.agentCode) {\n        return ack({ ok: false, error: "HYBRID_BACKGROUND_AGENT_INVALID" });\n      }\n      const meta = safeYoutubeBackgroundMeta(payload.background || {});\n      hybrid.status = "ready";\n      hybrid.updatedAt = Date.now();\n      void notifyMp4LabHybrid(hybrid, { ok: true, state: "ready", traceId, background: meta });\n      log("mp4lab_hybrid_background_ready", { traceId, jobId: hybrid.jobId, agentCode: hybrid.agentCode, background: meta });\n      return ack({ ok: true, hybrid: true });\n    }\n    const job = mediaJobs.get(traceId);'''
+if old not in s:
+    raise SystemExit('background complete anchor not found')
+s = s.replace(old, new, 1)
+
+old = '''  socket.on("agent:background:error", (payload = {}, ack = () => {}) => {\n    const traceId = String(payload.traceId || "");\n    const job = mediaJobs.get(traceId);'''
+new = '''  socket.on("agent:background:error", (payload = {}, ack = () => {}) => {\n    const traceId = String(payload.traceId || "");\n    const hybrid = hybridJobs.get(traceId);\n    if (hybrid) {\n      if (socket.data.role !== "agent" || socket.data.agentCode !== hybrid.agentCode) {\n        return ack({ ok: false, error: "HYBRID_BACKGROUND_AGENT_INVALID" });\n      }\n      const error = String(payload.error || "YouTube background failed").slice(-1200);\n      hybrid.status = "error";\n      hybrid.updatedAt = Date.now();\n      void notifyMp4LabHybrid(hybrid, { ok: false, state: "error", traceId, error });\n      log("mp4lab_hybrid_background_error", { traceId, jobId: hybrid.jobId, agentCode: hybrid.agentCode, error });\n      return ack({ ok: true, hybrid: true });\n    }\n    const job = mediaJobs.get(traceId);'''
+if old not in s:
+    raise SystemExit('background error anchor not found')
+s = s.replace(old, new, 1)
+
+p.write_text(s, encoding='utf-8')
+print('MP4 LAB hybrid bridge patch applied.')
