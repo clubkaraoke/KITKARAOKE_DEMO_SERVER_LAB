@@ -24,7 +24,7 @@ import requests
 import socketio
 
 APP_NAME = "KITKARAOKE Agent"
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 DEFAULT_SERVER = "https://demodj.kitkaraoke.com"
 
 VIDEO_EXTS = {".mp4", ".mkv", ".webm", ".mov", ".avi"}
@@ -1337,6 +1337,248 @@ class AgentApp:
                 errors.append(f"{label}: {str(exc)[-450:]}")
         raise RuntimeError("YOUTUBE_RESOLVE_FAILED · " + " | ".join(errors[-3:]))
 
+    # MP4LAB_STREAM_PIPE_V1
+def stream_youtube_background_to_ovh(
+    self,
+    selected: dict,
+    stream: dict,
+    duration: int,
+    upload_url: str,
+    upload_token: str,
+    trace_id: str,
+    room_code: str,
+) -> dict:
+    self.ensure_not_cancelled(trace_id)
+    if not self.ffmpeg_path:
+        raise RuntimeError("FFMPEG_NOT_AVAILABLE")
+    if not upload_url or "/hybrid-upload" not in upload_url:
+        raise RuntimeError("MP4LAB_STREAM_PIPE_INVALID_UPLOAD_URL")
+
+    header_lines = []
+    for key in ("User-Agent", "Referer", "Origin"):
+        value = str((stream.get("headers") or {}).get(key) or "")
+        if value:
+            header_lines.append(f"{key}: {value}\\r\\n")
+
+    source_width = int(stream.get("width") or 0)
+    source_height = int(stream.get("height") or 0)
+    source_codec = str(stream.get("vcodec") or "").lower()
+    source_ext = str(stream.get("ext") or "").lower()
+    can_stream_copy = bool(
+        ("avc1" in source_codec or "h264" in source_codec)
+        and source_ext == "mp4"
+        and source_height > 0
+        and source_height <= 480
+    )
+    prepare_mode = "PIPE_STREAM_COPY" if can_stream_copy else "PIPE_FAST_TRANSCODE"
+
+    input_args = [
+        "-reconnect", "1",
+        "-reconnect_streamed", "1",
+        "-reconnect_delay_max", "5",
+    ]
+    if header_lines:
+        input_args += ["-headers", "".join(header_lines)]
+
+    output_args = [
+        "-i", stream["url"],
+        "-t", str(duration),
+        "-map", "0:v:0",
+        "-an",
+    ]
+    if can_stream_copy:
+        output_args += ["-c:v", "copy"]
+    else:
+        output_args += [
+            "-vf",
+            "scale=w='min(iw,854)':h='min(ih,480)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "30",
+            "-maxrate", "1000k",
+            "-bufsize", "2000k",
+            "-pix_fmt", "yuv420p",
+        ]
+    output_args += [
+        "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+        "-f", "mp4",
+        "pipe:1",
+    ]
+
+    command = [
+        self.ffmpeg_path,
+        "-hide_banner",
+        "-loglevel", "error",
+        "-nostdin",
+    ] + input_args + output_args
+
+    self.emit_diag(
+        trace_id,
+        "YOUTUBE_BACKGROUND_PIPE_START",
+        {
+            "mode": prepare_mode,
+            "duration": duration,
+            "sourceWidth": source_width,
+            "sourceHeight": source_height,
+            "sourceCodec": stream.get("vcodec"),
+            "sourceExt": stream.get("ext"),
+            "transport": "HTTP_CHUNKED_PC_TO_OVH",
+            "localTempFile": False,
+        },
+        room_code=room_code,
+    )
+
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        bufsize=0,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+    )
+    if process.stdout is None or process.stderr is None:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        raise RuntimeError("FFMPEG_PIPE_NOT_AVAILABLE")
+
+    stderr_parts: list[bytes] = []
+    def drain_stderr() -> None:
+        try:
+            while True:
+                piece = process.stderr.read(8192)
+                if not piece:
+                    break
+                stderr_parts.append(piece)
+                if len(stderr_parts) > 80:
+                    del stderr_parts[:20]
+        except Exception:
+            pass
+    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+    stderr_thread.start()
+
+    started = time.perf_counter()
+    sent_bytes = 0
+    first_byte_ms = None
+
+    def body_iter():
+        nonlocal sent_bytes, first_byte_ms
+        try:
+            while True:
+                if self.is_cancelled(trace_id):
+                    try:
+                        process.terminate()
+                    except Exception:
+                        pass
+                    raise RuntimeError("PREPARE_SUPERSEDED")
+                chunk = os.read(process.stdout.fileno(), 64 * 1024)
+                if not chunk:
+                    break
+                sent_bytes += len(chunk)
+                if first_byte_ms is None:
+                    first_byte_ms = int((time.perf_counter() - started) * 1000)
+                    self.emit_diag(
+                        trace_id,
+                        "YOUTUBE_BACKGROUND_PIPE_FIRST_BYTE",
+                        {"elapsedMs": first_byte_ms, "bytes": len(chunk)},
+                        room_code=room_code,
+                    )
+                yield chunk
+        finally:
+            try:
+                process.stdout.close()
+            except Exception:
+                pass
+
+    try:
+        response = requests.put(
+            upload_url,
+            data=body_iter(),
+            headers={
+                "X-Upload-Token": upload_token,
+                "Content-Type": "video/mp4",
+            },
+            timeout=(15, max(300, int(duration) * 5)),
+        )
+    except Exception:
+        try:
+            process.kill()
+        except Exception:
+            pass
+        raise
+    finally:
+        try:
+            process.wait(timeout=20)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
+        stderr_thread.join(timeout=2)
+
+    stderr_text = b"".join(stderr_parts).decode("utf-8", errors="replace").strip()
+    if process.returncode not in (0, None):
+        raise RuntimeError("FFMPEG_PIPE_FAILED · " + (stderr_text[-1000:] or f"rc={process.returncode}"))
+    if response.status_code >= 400:
+        raise RuntimeError(
+            f"Upload background HTTP {response.status_code}: {response.text[:500]}"
+        )
+
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
+    try:
+        receiver = response.json()
+    except Exception:
+        receiver = {}
+
+    out_width = source_width
+    out_height = source_height
+    if not can_stream_copy and source_width > 0 and source_height > 0:
+        ratio = min(1.0, 854.0 / source_width, 480.0 / source_height)
+        out_width = max(2, int(source_width * ratio) // 2 * 2)
+        out_height = max(2, int(source_height * ratio) // 2 * 2)
+
+    meta = {
+        **selected,
+        "sourceWidth": source_width,
+        "sourceHeight": source_height,
+        "sourceFps": stream.get("fps"),
+        "sourceCodec": stream.get("vcodec"),
+        "outputWidth": out_width,
+        "outputHeight": out_height,
+        "outputFps": stream.get("fps"),
+        "resolverMode": stream.get("resolverMode"),
+        "prepareMode": prepare_mode,
+        "backgroundQuality": "normal",
+        "youtubeQualityPolicy": "BEST_AVAILABLE_UP_TO_480P",
+        "targetHeight": 480,
+        "noUpscale": True,
+        "bytes": int(receiver.get("bytes") or sent_bytes),
+        "elapsedMs": elapsed_ms,
+        "firstByteMs": first_byte_ms,
+        "muted": True,
+        "transport": "HTTP_CHUNKED_PC_TO_OVH",
+    }
+    self.emit_diag(
+        trace_id,
+        "YOUTUBE_BACKGROUND_PIPE_COMPLETE",
+        {
+            "bytes": meta["bytes"],
+            "elapsedMs": elapsed_ms,
+            "firstByteMs": first_byte_ms,
+            "mbps": round((sent_bytes * 8 / 1_000_000) / max(elapsed_ms / 1000, 0.001), 2),
+            "receiverState": receiver.get("state"),
+            "receiverDuration": receiver.get("duration"),
+        },
+        room_code=room_code,
+    )
+    self.emit_diag(
+        trace_id,
+        "YOUTUBE_BACKGROUND_TRANSCODE_READY",
+        meta,
+        room_code=room_code,
+    )
+    return meta
+
     def prepare_youtube_background(
         self,
         media: dict,
@@ -1395,6 +1637,19 @@ class AgentApp:
                 room_code,
             )
             self.ensure_not_cancelled(trace_id)
+
+            # MP4 LAB hybrid: FFmpeg reads YouTube on this PC and uploads to OVH
+            # while bytes are produced; no complete local background.mp4 is staged first.
+            if "/hybrid-upload" in upload_url:
+                meta = self.stream_youtube_background_to_ovh(
+                    selected, stream, duration, upload_url, upload_token, trace_id, room_code
+                )
+                self.ensure_not_cancelled(trace_id)
+                self.sio.emit(
+                    "agent:background:complete",
+                    {"traceId": trace_id, "background": meta},
+                )
+                return
 
             if core_ready_event is not None and not core_ready_event.is_set():
                 self.emit_diag(
