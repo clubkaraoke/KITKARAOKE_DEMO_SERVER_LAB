@@ -1,0 +1,329 @@
+name: Apply MP4 LAB direct stream pipe v1b once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/apply-mp4lab-stream-pipe-v1b-once.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  patch-test-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Patch Agent for YouTube -> PC -> OVH streaming
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          agent = Path('agent/windows/agent.py')
+          s = agent.read_text(encoding='utf-8')
+          if 'MP4LAB_STREAM_PIPE_V1' in s:
+              raise SystemExit('MP4LAB_STREAM_PIPE_V1 already present; refusing duplicate patch')
+          s = s.replace('APP_VERSION = "0.9.0"', 'APP_VERSION = "0.9.1"', 1)
+
+          anchor = '    def prepare_youtube_background(\n'
+          if anchor not in s:
+              raise SystemExit('prepare_youtube_background anchor not found')
+
+          helper = r'''    # MP4LAB_STREAM_PIPE_V1
+          def stream_youtube_background_to_ovh(
+              self,
+              selected: dict,
+              stream: dict,
+              duration: int,
+              upload_url: str,
+              upload_token: str,
+              trace_id: str,
+              room_code: str,
+          ) -> dict:
+              self.ensure_not_cancelled(trace_id)
+              if not self.ffmpeg_path:
+                  raise RuntimeError("FFMPEG_NOT_AVAILABLE")
+              if not upload_url or "/hybrid-upload" not in upload_url:
+                  raise RuntimeError("MP4LAB_STREAM_PIPE_INVALID_UPLOAD_URL")
+
+              header_lines = []
+              for key in ("User-Agent", "Referer", "Origin"):
+                  value = str((stream.get("headers") or {}).get(key) or "")
+                  if value:
+                      header_lines.append(f"{key}: {value}\\r\\n")
+
+              source_width = int(stream.get("width") or 0)
+              source_height = int(stream.get("height") or 0)
+              source_codec = str(stream.get("vcodec") or "").lower()
+              source_ext = str(stream.get("ext") or "").lower()
+              can_stream_copy = bool(
+                  ("avc1" in source_codec or "h264" in source_codec)
+                  and source_ext == "mp4"
+                  and source_height > 0
+                  and source_height <= 480
+              )
+              prepare_mode = "PIPE_STREAM_COPY" if can_stream_copy else "PIPE_FAST_TRANSCODE"
+
+              input_args = [
+                  "-reconnect", "1",
+                  "-reconnect_streamed", "1",
+                  "-reconnect_delay_max", "5",
+              ]
+              if header_lines:
+                  input_args += ["-headers", "".join(header_lines)]
+
+              output_args = [
+                  "-i", stream["url"],
+                  "-t", str(duration),
+                  "-map", "0:v:0",
+                  "-an",
+              ]
+              if can_stream_copy:
+                  output_args += ["-c:v", "copy"]
+              else:
+                  output_args += [
+                      "-vf",
+                      "scale=w='min(iw,854)':h='min(ih,480)':force_original_aspect_ratio=decrease:force_divisible_by=2",
+                      "-c:v", "libx264",
+                      "-preset", "ultrafast",
+                      "-crf", "30",
+                      "-maxrate", "1000k",
+                      "-bufsize", "2000k",
+                      "-pix_fmt", "yuv420p",
+                  ]
+              output_args += [
+                  "-movflags", "+frag_keyframe+empty_moov+default_base_moof",
+                  "-f", "mp4",
+                  "pipe:1",
+              ]
+
+              command = [
+                  self.ffmpeg_path,
+                  "-hide_banner",
+                  "-loglevel", "error",
+                  "-nostdin",
+              ] + input_args + output_args
+
+              self.emit_diag(
+                  trace_id,
+                  "YOUTUBE_BACKGROUND_PIPE_START",
+                  {
+                      "mode": prepare_mode,
+                      "duration": duration,
+                      "sourceWidth": source_width,
+                      "sourceHeight": source_height,
+                      "sourceCodec": stream.get("vcodec"),
+                      "sourceExt": stream.get("ext"),
+                      "transport": "HTTP_CHUNKED_PC_TO_OVH",
+                      "localTempFile": False,
+                  },
+                  room_code=room_code,
+              )
+
+              process = subprocess.Popen(
+                  command,
+                  stdout=subprocess.PIPE,
+                  stderr=subprocess.PIPE,
+                  bufsize=0,
+                  creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
+              )
+              if process.stdout is None or process.stderr is None:
+                  try:
+                      process.kill()
+                  except Exception:
+                      pass
+                  raise RuntimeError("FFMPEG_PIPE_NOT_AVAILABLE")
+
+              stderr_parts: list[bytes] = []
+              def drain_stderr() -> None:
+                  try:
+                      while True:
+                          piece = process.stderr.read(8192)
+                          if not piece:
+                              break
+                          stderr_parts.append(piece)
+                          if len(stderr_parts) > 80:
+                              del stderr_parts[:20]
+                  except Exception:
+                      pass
+              stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+              stderr_thread.start()
+
+              started = time.perf_counter()
+              sent_bytes = 0
+              first_byte_ms = None
+
+              def body_iter():
+                  nonlocal sent_bytes, first_byte_ms
+                  try:
+                      while True:
+                          if self.is_cancelled(trace_id):
+                              try:
+                                  process.terminate()
+                              except Exception:
+                                  pass
+                              raise RuntimeError("PREPARE_SUPERSEDED")
+                          chunk = os.read(process.stdout.fileno(), 64 * 1024)
+                          if not chunk:
+                              break
+                          sent_bytes += len(chunk)
+                          if first_byte_ms is None:
+                              first_byte_ms = int((time.perf_counter() - started) * 1000)
+                              self.emit_diag(
+                                  trace_id,
+                                  "YOUTUBE_BACKGROUND_PIPE_FIRST_BYTE",
+                                  {"elapsedMs": first_byte_ms, "bytes": len(chunk)},
+                                  room_code=room_code,
+                              )
+                          yield chunk
+                  finally:
+                      try:
+                          process.stdout.close()
+                      except Exception:
+                          pass
+
+              try:
+                  response = requests.put(
+                      upload_url,
+                      data=body_iter(),
+                      headers={
+                          "X-Upload-Token": upload_token,
+                          "Content-Type": "video/mp4",
+                      },
+                      timeout=(15, max(300, int(duration) * 5)),
+                  )
+              except Exception:
+                  try:
+                      process.kill()
+                  except Exception:
+                      pass
+                  raise
+              finally:
+                  try:
+                      process.wait(timeout=20)
+                  except Exception:
+                      try:
+                          process.kill()
+                      except Exception:
+                          pass
+                  stderr_thread.join(timeout=2)
+
+              stderr_text = b"".join(stderr_parts).decode("utf-8", errors="replace").strip()
+              if process.returncode not in (0, None):
+                  raise RuntimeError("FFMPEG_PIPE_FAILED · " + (stderr_text[-1000:] or f"rc={process.returncode}"))
+              if response.status_code >= 400:
+                  raise RuntimeError(
+                      f"Upload background HTTP {response.status_code}: {response.text[:500]}"
+                  )
+
+              elapsed_ms = int((time.perf_counter() - started) * 1000)
+              try:
+                  receiver = response.json()
+              except Exception:
+                  receiver = {}
+
+              out_width = source_width
+              out_height = source_height
+              if not can_stream_copy and source_width > 0 and source_height > 0:
+                  ratio = min(1.0, 854.0 / source_width, 480.0 / source_height)
+                  out_width = max(2, int(source_width * ratio) // 2 * 2)
+                  out_height = max(2, int(source_height * ratio) // 2 * 2)
+
+              meta = {
+                  **selected,
+                  "sourceWidth": source_width,
+                  "sourceHeight": source_height,
+                  "sourceFps": stream.get("fps"),
+                  "sourceCodec": stream.get("vcodec"),
+                  "outputWidth": out_width,
+                  "outputHeight": out_height,
+                  "outputFps": stream.get("fps"),
+                  "resolverMode": stream.get("resolverMode"),
+                  "prepareMode": prepare_mode,
+                  "backgroundQuality": "normal",
+                  "youtubeQualityPolicy": "BEST_AVAILABLE_UP_TO_480P",
+                  "targetHeight": 480,
+                  "noUpscale": True,
+                  "bytes": int(receiver.get("bytes") or sent_bytes),
+                  "elapsedMs": elapsed_ms,
+                  "firstByteMs": first_byte_ms,
+                  "muted": True,
+                  "transport": "HTTP_CHUNKED_PC_TO_OVH",
+              }
+              self.emit_diag(
+                  trace_id,
+                  "YOUTUBE_BACKGROUND_PIPE_COMPLETE",
+                  {
+                      "bytes": meta["bytes"],
+                      "elapsedMs": elapsed_ms,
+                      "firstByteMs": first_byte_ms,
+                      "mbps": round((sent_bytes * 8 / 1_000_000) / max(elapsed_ms / 1000, 0.001), 2),
+                      "receiverState": receiver.get("state"),
+                      "receiverDuration": receiver.get("duration"),
+                  },
+                  room_code=room_code,
+              )
+              self.emit_diag(
+                  trace_id,
+                  "YOUTUBE_BACKGROUND_TRANSCODE_READY",
+                  meta,
+                  room_code=room_code,
+              )
+              return meta
+
+          '''
+          s = s.replace(anchor, helper + anchor, 1)
+
+          old = '''            self.ensure_not_cancelled(trace_id)\n\n            if core_ready_event is not None and not core_ready_event.is_set():'''
+          new = '''            self.ensure_not_cancelled(trace_id)\n\n            # MP4 LAB hybrid: FFmpeg reads YouTube on this PC and uploads to OVH\n            # while bytes are produced; no complete local background.mp4 is staged first.\n            if "/hybrid-upload" in upload_url:\n                meta = self.stream_youtube_background_to_ovh(\n                    selected, stream, duration, upload_url, upload_token, trace_id, room_code\n                )\n                self.ensure_not_cancelled(trace_id)\n                self.sio.emit(\n                    "agent:background:complete",\n                    {"traceId": trace_id, "background": meta},\n                )\n                return\n\n            if core_ready_event is not None and not core_ready_event.is_set():'''
+          if old not in s:
+              raise SystemExit('hybrid branch anchor not found')
+          s = s.replace(old, new, 1)
+          agent.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Validate patch
+        run: |
+          set -euo pipefail
+          python3 -m py_compile agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.9.1"' agent/windows/agent.py
+          grep -q 'MP4LAB_STREAM_PIPE_V1' agent/windows/agent.py
+          grep -q 'HTTP_CHUNKED_PC_TO_OVH' agent/windows/agent.py
+          grep -q 'frag_keyframe+empty_moov+default_base_moof' agent/windows/agent.py
+          grep -q 'os.read(process.stdout.fileno(), 64 \* 1024)' agent/windows/agent.py
+
+      - name: Commit Agent patch only
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add agent/windows/agent.py
+          git diff --cached --check
+          git commit -m "feat: stream MP4 LAB YouTube background PC to OVH"
+          git push origin HEAD:main
+
+      - name: Build Agent 0.9.1 ZIP
+        run: |
+          set -euo pipefail
+          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1
+          mkdir -p "$ROOT/engine"
+          cp agent/windows/agent.py "$ROOT/"
+          cp agent/windows/requirements.txt "$ROOT/"
+          cp agent/windows/INICIAR_KITKARAOKE_AGENT.bat "$ROOT/"
+          cp agent/windows/README.md "$ROOT/"
+          curl -fL --retry 3 \
+            https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-pc-windows-msvc.zip \
+            -o /tmp/deno-windows.zip
+          echo "15e5300b0ba3c3695a7621d90160a746ec9e710228cee639afa9d580f6e3cd11  /tmp/deno-windows.zip" | sha256sum -c -
+          unzip -j /tmp/deno-windows.zip deno.exe -d "$ROOT/engine"
+          cd dist
+          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1
+
+      - name: Upload Agent ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1
+          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1.zip
+          retention-days: 14
