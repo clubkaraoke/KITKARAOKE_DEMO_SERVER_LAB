@@ -99,7 +99,7 @@ jobs:
           grep -q '>ORIGINAL</button>' public/dj.html
           grep -q 'transparentBackground' public/sdf-renderer.js
           grep -q 'transparentBackground' public/sdf-karaoke-pro-renderer.js
-          grep -q 'APP_VERSION = "0.9.0"' agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.9.1"' agent/windows/agent.py
           grep -q '"videoQualities": \["original"\]' agent/windows/agent.py
           grep -q '"preserveOriginalVideoResolution": True' agent/windows/agent.py
           grep -q 'AGENT_VIDEO_SOURCE_PROBED' agent/windows/agent.py
@@ -157,6 +157,9 @@ jobs:
           grep -q 'FAST_TRANSCODE' agent/windows/agent.py
           grep -q '"audioAacBitrate": "192k"' agent/windows/agent.py
           grep -q '"-b:a", "192k"' agent/windows/agent.py
+          grep -q 'MP4LAB_STREAM_PIPE_V1' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_PIPE_START' agent/windows/agent.py
+          grep -q 'HTTP_CHUNKED_PC_TO_OVH' agent/windows/agent.py
           python3 - <<'PY'
           from pathlib import Path
           s=Path('src/server-v3.js').read_text(encoding='utf-8')
