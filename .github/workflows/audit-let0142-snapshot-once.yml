@@ -1,0 +1,61 @@
+name: Audit LET-0142 snapshot once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/audit-let0142-snapshot-once.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure SSH
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_PORT: ${{ secrets.OVH_PORT }}
+          OVH_SSH_KEY: ${{ secrets.OVH_SSH_KEY }}
+        run: |
+          set -euo pipefail
+          PORT="${OVH_PORT:-22}"
+          mkdir -p ~/.ssh && chmod 700 ~/.ssh
+          printf '%s\n' "$OVH_SSH_KEY" | tr -d '\r' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -p "$PORT" -t ed25519 "$OVH_HOST" 2>/dev/null > ~/.ssh/known_hosts
+      - name: Read live MP4 LAB snapshot state
+        env:
+          OVH_HOST: ${{ secrets.OVH_HOST }}
+          OVH_PORT: ${{ secrets.OVH_PORT }}
+          OVH_USER: ${{ secrets.OVH_USER }}
+        run: |
+          set -euo pipefail
+          PORT="${OVH_PORT:-22}"
+          ssh -p "$PORT" "$OVH_USER@$OVH_HOST" 'sudo bash -s' <<'REMOTE'
+          set -u
+          echo '=== SERVICE ==='
+          systemctl show djgabo-mp4-lab.service -p ActiveState -p SubState -p MainPID -p WorkingDirectory -p ExecStart --no-pager || true
+          WD=$(systemctl show djgabo-mp4-lab.service -p WorkingDirectory --value 2>/dev/null || true)
+          PID=$(systemctl show djgabo-mp4-lab.service -p MainPID --value 2>/dev/null || true)
+          [ -z "$WD" ] && [ -n "$PID" ] && [ "$PID" != 0 ] && WD=$(readlink -f "/proc/$PID/cwd" 2>/dev/null || true)
+          echo "WD=$WD"
+          echo '=== LET-0142 FILES ==='
+          [ -n "$WD" ] && find "$WD" -type f -iname '*LET-0142*' -printf '%p | %s bytes | %TY-%Tm-%Td %TH:%TM:%TS\n' 2>/dev/null | head -100 || true
+          echo '=== LOGS 19:25+ ==='
+          journalctl -u djgabo-mp4-lab.service --since '2026-09-10 19:20:00' --no-pager 2>/dev/null | grep -Ei -C 8 'LET-0142|snapshot|editor|ingest|save|error|exception|traceback| 4[0-9][0-9] | 5[0-9][0-9] ' | tail -1200 || true
+          echo '=== NGINX ACCESS LET-0142 ==='
+          for f in /var/log/nginx/access.log /var/log/nginx/*access*.log; do
+            [ -f "$f" ] || continue
+            grep -F 'LET-0142' "$f" 2>/dev/null | tail -100 || true
+          done
+          echo '=== MP4 LAB ROUTES / SNAPSHOT CODE ==='
+          if [ -n "$WD" ] && [ -d "$WD" ]; then
+            find "$WD" -maxdepth 5 -type f \( -name '*.py' -o -name '*.js' -o -name '*.html' \) -not -path '*/venv/*' -not -path '*/.venv/*' -not -path '*/node_modules/*' -print0 2>/dev/null | xargs -0 -r grep -nEi -C 15 'snapshot|from.editor|editor.*mp4|mp4.*editor|no fue enviado|No se pudo cargar|@app\.(post|route)|LET-0142' 2>/dev/null | head -2600 || true
+          fi
+          echo '=== APP FILE CANDIDATES ==='
+          [ -n "$WD" ] && find "$WD" -maxdepth 2 -type f -printf '%p\n' 2>/dev/null | head -200 || true
+          REMOTE
