@@ -1,0 +1,109 @@
+name: Fix MP4 LAB stream pipe class indentation once
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/fix-mp4lab-stream-pipe-indent-once.yml"
+
+permissions:
+  contents: write
+
+jobs:
+  fix-test-package:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fix method indentation
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import ast
+
+          path = Path('agent/windows/agent.py')
+          s = path.read_text(encoding='utf-8')
+          start = s.find('\ndef stream_youtube_background_to_ovh(')
+          end = s.find('\n    def prepare_youtube_background(', start)
+          if start < 0 or end < 0:
+              raise SystemExit(f'bad anchors start={start} end={end}')
+
+          block = s[start + 1:end]
+          fixed = '\n'.join(('    ' + line) if line else line for line in block.split('\n'))
+          s = s[:start + 1] + fixed + s[end:]
+          path.write_text(s, encoding='utf-8')
+
+          tree = ast.parse(s)
+          owners = []
+          for node in tree.body:
+              if isinstance(node, ast.ClassDef):
+                  methods = {x.name for x in node.body if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                  if 'prepare_youtube_background' in methods:
+                      owners.append((node.name, methods))
+          if len(owners) != 1:
+              raise SystemExit(f'prepare_youtube_background class owners={[(n, len(m)) for n,m in owners]}')
+          owner, methods = owners[0]
+          if 'stream_youtube_background_to_ovh' not in methods:
+              raise SystemExit(f'stream method not in class {owner}')
+          print(f'OK methods are class members of {owner}')
+          PY
+
+      - name: Validate runtime structure
+        run: |
+          set -euo pipefail
+          python3 -m py_compile agent/windows/agent.py
+          python3 - <<'PY'
+          import ast
+          from pathlib import Path
+          s=Path('agent/windows/agent.py').read_text(encoding='utf-8')
+          t=ast.parse(s)
+          assert not any(isinstance(n, ast.FunctionDef) and n.name == 'stream_youtube_background_to_ovh' for n in t.body)
+          classes=[n for n in t.body if isinstance(n, ast.ClassDef)]
+          hits=[]
+          for c in classes:
+              names={n.name for n in c.body if isinstance(n, ast.FunctionDef)}
+              if 'prepare_youtube_background' in names:
+                  hits.append((c.name,names))
+          assert len(hits)==1
+          assert 'stream_youtube_background_to_ovh' in hits[0][1]
+          print('AST_CLASS_METHODS_OK', hits[0][0])
+          PY
+          grep -q 'APP_VERSION = "0.9.1"' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_PIPE_START' agent/windows/agent.py
+          grep -q 'HTTP_CHUNKED_PC_TO_OVH' agent/windows/agent.py
+
+      - name: Commit fixed Agent
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add agent/windows/agent.py
+          git diff --cached --check
+          git commit -m "fix: keep MP4 LAB stream relay inside Agent class"
+          git push origin HEAD:main
+
+      - name: Build fixed Agent 0.9.1 ZIP
+        run: |
+          set -euo pipefail
+          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1
+          mkdir -p "$ROOT/engine"
+          cp agent/windows/agent.py "$ROOT/"
+          cp agent/windows/requirements.txt "$ROOT/"
+          cp agent/windows/INICIAR_KITKARAOKE_AGENT.bat "$ROOT/"
+          cp agent/windows/README.md "$ROOT/"
+          curl -fL --retry 3 \
+            https://github.com/denoland/deno/releases/download/v2.9.6/deno-x86_64-pc-windows-msvc.zip \
+            -o /tmp/deno-windows.zip
+          echo "15e5300b0ba3c3695a7621d90160a746ec9e710228cee639afa9d580f6e3cd11  /tmp/deno-windows.zip" | sha256sum -c -
+          unzip -j /tmp/deno-windows.zip deno.exe -d "$ROOT/engine"
+          cd dist
+          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1
+
+      - name: Upload fixed Agent ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1_FIXED
+          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1.zip
+          if-no-files-found: error
+          retention-days: 14
