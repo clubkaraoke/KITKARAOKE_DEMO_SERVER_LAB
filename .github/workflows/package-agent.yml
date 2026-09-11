@@ -18,7 +18,7 @@ jobs:
       - name: Validate agent
         run: |
           python3 -m py_compile agent/windows/agent.py
-          grep -q 'APP_VERSION = "0.9.0"' agent/windows/agent.py
+          grep -q 'APP_VERSION = "0.9.1"' agent/windows/agent.py
           grep -q 'AGENT_PREPARE_COMPLETE' agent/windows/agent.py
           grep -q 'AGENT_VIDEO_SOURCE_PROBED' agent/windows/agent.py
           grep -q 'ORIGINAL_RESOLUTION_GUARD' agent/windows/agent.py
@@ -41,11 +41,14 @@ jobs:
           grep -q 'height<=480' agent/windows/agent.py
           grep -q 'duration not in (30, 45, 60, 120)' agent/windows/agent.py
           grep -q '"-b:a", "192k"' agent/windows/agent.py
+          grep -q 'MP4LAB_STREAM_PIPE_V1' agent/windows/agent.py
+          grep -q 'YOUTUBE_BACKGROUND_PIPE_START' agent/windows/agent.py
+          grep -q 'HTTP_CHUNKED_PC_TO_OVH' agent/windows/agent.py
 
       - name: Build ZIP
         run: |
           set -euo pipefail
-          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0
+          ROOT=dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1
           mkdir -p "$ROOT/engine"
           cp agent/windows/agent.py "$ROOT/"
           cp agent/windows/requirements.txt "$ROOT/"
@@ -60,12 +63,12 @@ jobs:
           test -s "$ROOT/engine/deno.exe"
 
           cd dist
-          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0
+          zip -r KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1.zip KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1
 
       - name: Upload ZIP artifact
         uses: actions/upload-artifact@v4
         with:
-          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0
-          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.0.zip
+          name: KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1
+          path: dist/KITKARAOKE_AGENT_WINDOWS_LAB_V0.9.1.zip
           if-no-files-found: error
           retention-days: 14
