@@ -1,0 +1,3 @@
+MP4 LAB stream pipe v1 verification marker.
+Agent 0.9.1 relays YouTube background bytes PC -> OVH over chunked HTTP for hybrid-upload jobs.
+Validated class ownership: AgentApp.stream_youtube_background_to_ovh.
